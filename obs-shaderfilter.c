@@ -7,6 +7,7 @@
 
 #include <util/base.h>
 #include <util/dstr.h>
+#include <util/darray.h>
 #include <util/platform.h>
 
 #include <float.h>
@@ -82,7 +83,11 @@ technique Draw\
 struct effect_param_data {
 	struct dstr name;
 	struct dstr display_name;
+	struct dstr widget_type;
 	struct dstr description;
+	DARRAY(int) option_values;		// Does this get free'd?
+	DARRAY(struct dstr) option_labels;	// Does this get free'd?
+
 	enum gs_shader_param_type type;
 	gs_eparam_t *param;
 
@@ -95,6 +100,7 @@ struct effect_param_data {
 		double f;
 		char *string;
 	} value;
+	char *label;
 	union {
 		long long i;
 		double f;
@@ -318,6 +324,8 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			dstr_copy(&cached_data->name, info.name);
 			cached_data->type = info.type;
 			cached_data->param = param;
+			da_init(cached_data->option_values);
+			da_init(cached_data->option_labels);
 			const size_t annotation_count =
 				gs_param_get_num_annotations(param);
 			for (size_t annotation_index = 0;
@@ -334,6 +342,91 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 						(const char *)
 							gs_effect_get_default_val(
 								annotation));
+				} else if (strcmp(info.name, "label") == 0 &&
+				    info.type == GS_SHADER_PARAM_STRING) {
+					dstr_copy(
+						&cached_data->display_name,
+						(const char *)
+							gs_effect_get_default_val(
+								annotation));
+				} else if (strcmp(info.name, "widget_type") == 0 &&
+				    info.type == GS_SHADER_PARAM_STRING) {
+					dstr_copy(
+						&cached_data->widget_type,
+						(const char *)
+							gs_effect_get_default_val(
+								annotation));
+				} else if (strcmp(info.name, "minimum") == 0) {
+					switch (info.type) {
+					case GS_SHADER_PARAM_FLOAT:
+						cached_data->minimum.f =
+							*(float *)gs_effect_get_default_val(
+								annotation);
+						break;
+					case GS_SHADER_PARAM_INT:
+						cached_data->minimum.i =
+							*(int *)gs_effect_get_default_val(
+								annotation);
+						break;
+					}
+				} else if (strcmp(info.name, "maximum") == 0) {
+					switch (info.type) {
+					case GS_SHADER_PARAM_FLOAT:
+						cached_data->maximum.f =
+							*(float *)gs_effect_get_default_val(
+								annotation);
+						break;
+					case GS_SHADER_PARAM_INT:
+						cached_data->maximum.i =
+							*(int *)gs_effect_get_default_val(
+								annotation);
+						break;
+					}
+				} else if (strcmp(info.name, "step") == 0) {
+					switch (info.type) {
+					case GS_SHADER_PARAM_FLOAT:
+						cached_data->step.f =
+							*(float *)gs_effect_get_default_val(
+								annotation);
+						break;
+					case GS_SHADER_PARAM_INT:
+						cached_data->step.i =
+							*(int *)gs_effect_get_default_val(
+								annotation);
+						break;
+					}
+				} else if (strncmp(info.name, "option_", 7) == 0) {
+					char b[100];
+					strcpy(b, info.name);
+					char *token = strtok(b, "_");
+					token = strtok(NULL, "_");
+					int id = atoi(token);
+					switch (info.type) {
+					case GS_SHADER_PARAM_INT: {
+						int val =
+							*(int *)gs_effect_get_default_val(
+								annotation);
+						int* cd = da_insert_new(
+							cached_data
+								->option_values,
+							id);
+						*cd = val;
+						break;
+					}
+					case GS_SHADER_PARAM_STRING: {
+						struct dstr val = {0};
+						dstr_copy(
+							&val,
+							(const char *)gs_effect_get_default_val(
+								annotation));
+						struct dstr* cs = da_insert_new(
+							cached_data
+								->option_labels,
+							id);
+						*cs = val;
+						break;
+					}
+					}
 				}
 			}
 		}
@@ -575,42 +668,83 @@ static obs_properties_t *shader_filter_properties(void *data)
 			(filter->stored_param_list.array + param_index);
 		//gs_eparam_t *annot = gs_param_get_annotation_by_idx(param->param, param_index);
 		const char *param_name = param->name.array;
+		const char *label = param->display_name.array;
+		const char *widget_type = param->widget_type.array;
+		const int *options = param->option_values.array;
+		const struct dstr *option_labels = param->option_labels.array;
+
 		struct dstr display_name = {0};
 		struct dstr sources_name = {0};
-		dstr_ncat(&display_name, param_name, param->name.len);
-		dstr_replace(&display_name, "_", " ");
+
+		if (label == NULL) {
+			dstr_ncat(&display_name, param_name, param->name.len);
+			dstr_replace(&display_name, "_", " ");
+		} else {
+			dstr_ncat(&display_name, label, param->display_name.len);
+		}
+
 
 		switch (param->type) {
 		case GS_SHADER_PARAM_BOOL:
 			obs_properties_add_bool(props, param_name,
 						display_name.array);
 			break;
-		case GS_SHADER_PARAM_FLOAT:
+		case GS_SHADER_PARAM_FLOAT: {
+			double range_min = param->minimum.f;
+			double range_max = param->maximum.f;
+			double step = param->step.f;
+			if (range_min == range_max) {
+				range_min = -1000.0;
+				range_max = 1000.0;
+				step = 0.0001;
+			}
 			obs_properties_remove_by_name(props, param_name);
-			if (!filter->use_sliders) {
-
+			if (widget_type != NULL && strcmp(widget_type, "slider") == 0) {
+				obs_properties_add_float_slider(
+					props, param_name, display_name.array,
+					range_min, range_max, step);
+			} else {
 				obs_properties_add_float(props, param_name,
 							 display_name.array,
 							 -FLT_MAX, FLT_MAX,
 							 0.000001);
-			} else {
-				obs_properties_add_float_slider(
-					props, param_name, display_name.array,
-					-1000.0, 1000, 0.000001);
 			}
 			break;
-		case GS_SHADER_PARAM_INT:
+		}
+		case GS_SHADER_PARAM_INT: {
+			int range_min = (int)param->minimum.i;
+			int range_max = (int)param->maximum.i;
+			int step = (int)param->step.i;
+			if (range_min == range_max) {
+				range_min = -1000;
+				range_max = 1000;
+				step = 1;
+			}
 			obs_properties_remove_by_name(props, param_name);
-			if (!filter->use_sliders) {
+
+			if (widget_type != NULL &&
+			    strcmp(widget_type, "slider") == 0) {
+				obs_properties_add_int_slider(
+					props, param_name, display_name.array,
+					range_min, range_max, step);
+			} else if (widget_type != NULL &&
+				   strcmp(widget_type, "select") == 0) {
+				obs_property_t *plist = obs_properties_add_list(
+					props, param_name, display_name.array,
+					OBS_COMBO_TYPE_LIST,
+					OBS_COMBO_FORMAT_INT);
+				for (int i = 0; i < param->option_values.num; i++) {
+					obs_property_list_add_int(
+						plist, option_labels[i].array,
+						options[i]);
+				}
+			} else {
 				obs_properties_add_int(props, param_name,
 						       display_name.array,
 						       INT_MIN, INT_MAX, 1);
-			} else {
-				obs_properties_add_int_slider(
-					props, param_name, display_name.array,
-					-1000, 1000, 1);
 			}
 			break;
+		}
 		case GS_SHADER_PARAM_INT3:
 
 			break;
@@ -684,6 +818,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		obs_source_t *source = NULL;
 		dstr_ncat(&display_name, param_name, param->name.len);
 		dstr_replace(&display_name, "_", " ");
+
 
 		switch (param->type) {
 		case GS_SHADER_PARAM_BOOL:
