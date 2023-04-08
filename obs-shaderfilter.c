@@ -14,8 +14,10 @@
 #include <limits.h>
 #include <stdio.h>
 #include <time.h>
+#include <string.h>
 
 #include <util/threading.h>
+#include <windows.h>
 
 /* clang-format off */
 
@@ -183,6 +185,64 @@ static unsigned int rand_interval(unsigned int min, unsigned int max)
 	return min + (r / buckets);
 }
 
+static char* load_shader_from_file(const char *file_name) // add input of visited files
+{
+	struct dstr shader_file;
+	dstr_init(&shader_file);
+	char *delimeter = "\n";
+	char *file_ptr = os_quick_read_utf8_file(file_name);
+	char *file = bstrdup(file_ptr);
+
+	char **lines = strlist_split(file, '\n', true);
+
+	size_t line_i = 0;
+	while (lines[line_i] != NULL) {
+		char *line = lines[line_i];
+		line_i++;
+		if (strncmp(line, "#include", 8) == 0) {
+			// Open the included file, place contents here.
+			char *pos = strrchr(file_name, '/');
+			const size_t length = pos - file_name + 1;
+			char include_path[MAX_PATH];
+			strncpy(include_path, file_name, length);
+			include_path[length] = '\0';
+			char *start = strchr(line, '"')+1;
+			char *end = strrchr(line, '"');
+			char include_file[MAX_PATH];
+			strncpy(include_file, start, end - start);
+			include_file[end - start] = '\0';
+			strcat(include_path, include_file);
+			char *abs_include_path =
+				os_get_abs_path_ptr(include_path);
+			char *file_contents =
+				load_shader_from_file(abs_include_path);
+			dstr_cat(&shader_file, file_contents);
+			dstr_cat(&shader_file, "\n");
+		} else {
+			// else place current line here.
+			dstr_cat(&shader_file, line);
+			dstr_cat(&shader_file, "\n");
+		}
+	}
+
+	// Add file_name to visited files
+	// Do stuff with the file, and populate shader_file
+	/*
+
+		for line in file:
+		   if line starts with #include
+		       get path
+		       if path is not in visited files
+			   include_file_contents = load_shader_from_file(path)
+	                   concat include_file_contents onto shader_file
+	           else
+		       concat line onto shader_file
+	*/
+	bfree(file);
+	strlist_free(lines);
+	return shader_file.array;
+}
+
 static void shader_filter_reload_effect(struct shader_filter_data *filter)
 {
 	obs_data_t *settings = obs_source_get_settings(filter->context);
@@ -241,7 +301,9 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	if (obs_data_get_bool(settings, "from_file")) {
 		const char *file_name =
 			obs_data_get_string(settings, "shader_file_name");
-		shader_text = os_quick_read_utf8_file(file_name);
+		shader_text = load_shader_from_file(file_name);
+		printf(shader_text);
+		//load_shader_from_file(file_name, shader_text);
 	} else {
 		shader_text =
 			bstrdup(obs_data_get_string(settings, "shader_text"));
