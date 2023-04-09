@@ -87,8 +87,8 @@ struct effect_param_data {
 	struct dstr display_name;
 	struct dstr widget_type;
 	struct dstr description;
-	DARRAY(int) option_values;		// Does this get free'd?
-	DARRAY(struct dstr) option_labels;	// Does this get free'd?
+	DARRAY(int) option_values;
+	DARRAY(struct dstr) option_labels;
 
 	enum gs_shader_param_type type;
 	gs_eparam_t *param;
@@ -185,18 +185,18 @@ static unsigned int rand_interval(unsigned int min, unsigned int max)
 	return min + (r / buckets);
 }
 
-static char* load_shader_from_file(const char *file_name) // add input of visited files
+static char *
+load_shader_from_file(const char *file_name) // add input of visited files
 {
 
 	char *file_ptr = os_quick_read_utf8_file(file_name);
 	if (file_ptr == NULL)
 		return NULL;
 	char *file = bstrdup(os_quick_read_utf8_file(file_name));
-	char **lines =
-		strlist_split(file, '\n', true);
+	char **lines = strlist_split(file, '\n', true);
 	struct dstr shader_file;
 	dstr_init(&shader_file);
-	
+
 	size_t line_i = 0;
 	while (lines[line_i] != NULL) {
 		char *line = lines[line_i];
@@ -207,7 +207,7 @@ static char* load_shader_from_file(const char *file_name) // add input of visite
 			const size_t length = pos - file_name + 1;
 			struct dstr include_path = {0};
 			dstr_ncopy(&include_path, file_name, length);
-			char *start = strchr(line, '"')+1;
+			char *start = strchr(line, '"') + 1;
 			char *end = strrchr(line, '"');
 
 			dstr_ncat(&include_path, start, end - start);
@@ -418,14 +418,17 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 							gs_effect_get_default_val(
 								annotation));
 				} else if (strcmp(info.name, "label") == 0 &&
-				    info.type == GS_SHADER_PARAM_STRING) {
+					   info.type ==
+						   GS_SHADER_PARAM_STRING) {
 					dstr_copy(
 						&cached_data->display_name,
 						(const char *)
 							gs_effect_get_default_val(
 								annotation));
-				} else if (strcmp(info.name, "widget_type") == 0 &&
-				    info.type == GS_SHADER_PARAM_STRING) {
+				} else if (strcmp(info.name, "widget_type") ==
+						   0 &&
+					   info.type ==
+						   GS_SHADER_PARAM_STRING) {
 					dstr_copy(
 						&cached_data->widget_type,
 						(const char *)
@@ -470,18 +473,15 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 								annotation);
 						break;
 					}
-				} else if (strncmp(info.name, "option_", 7) == 0) {
-					char b[100];
-					strcpy(b, info.name);
-					char *token = strtok(b, "_");
-					token = strtok(NULL, "_");
-					int id = atoi(token);
+				} else if (strncmp(info.name, "option_", 7) ==
+					   0) {
+					int id = atoi(info.name + 7);
 					switch (info.type) {
 					case GS_SHADER_PARAM_INT: {
 						int val =
 							*(int *)gs_effect_get_default_val(
 								annotation);
-						int* cd = da_insert_new(
+						int *cd = da_insert_new(
 							cached_data
 								->option_values,
 							id);
@@ -494,7 +494,7 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 							&val,
 							(const char *)gs_effect_get_default_val(
 								annotation));
-						struct dstr* cs = da_insert_new(
+						struct dstr *cs = da_insert_new(
 							cached_data
 								->option_labels,
 							id);
@@ -733,9 +733,9 @@ static obs_properties_t *shader_filter_properties(void *data)
 			dstr_ncat(&display_name, param_name, param->name.len);
 			dstr_replace(&display_name, "_", " ");
 		} else {
-			dstr_ncat(&display_name, label, param->display_name.len);
+			dstr_ncat(&display_name, label,
+				  param->display_name.len);
 		}
-
 
 		switch (param->type) {
 		case GS_SHADER_PARAM_BOOL:
@@ -752,7 +752,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 				step = 0.0001;
 			}
 			obs_properties_remove_by_name(props, param_name);
-			if (widget_type != NULL && strcmp(widget_type, "slider") == 0) {
+			if (widget_type != NULL &&
+			    strcmp(widget_type, "slider") == 0) {
 				obs_properties_add_float_slider(
 					props, param_name, display_name.array,
 					range_min, range_max, step);
@@ -872,7 +873,6 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		obs_source_t *source = NULL;
 		dstr_ncat(&display_name, param_name, param->name.len);
 		dstr_replace(&display_name, "_", " ");
-
 
 		switch (param->type) {
 		case GS_SHADER_PARAM_BOOL:
