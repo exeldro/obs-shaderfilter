@@ -753,8 +753,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 			} else {
 				obs_properties_add_float(props, param_name,
 							 display_name.array,
-							 -FLT_MAX, FLT_MAX,
-							 0.000001);
+							 range_min, range_max,
+							 step);
 			}
 			break;
 		}
@@ -789,7 +789,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 			} else {
 				obs_properties_add_int(props, param_name,
 						       display_name.array,
-						       INT_MIN, INT_MAX, 1);
+						       range_min, range_max,
+						       step);
 			}
 			break;
 		}
@@ -817,9 +818,16 @@ static obs_properties_t *shader_filter_properties(void *data)
 				shader_filter_texture_file_filter, NULL);
 			break;
 		case GS_SHADER_PARAM_STRING:
-			obs_properties_add_text(props, param_name,
-						display_name.array,
-						OBS_TEXT_MULTILINE);
+			if (widget_type != NULL &&
+			    strcmp(widget_type, "info") == 0) {
+				obs_properties_add_text(props, param_name,
+							display_name.array,
+							OBS_TEXT_INFO);
+			} else {
+				obs_properties_add_text(props, param_name,
+							display_name.array,
+							OBS_TEXT_MULTILINE);
+			}
 			break;
 		default:;
 		}

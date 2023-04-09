@@ -15,7 +15,9 @@ uniform float rand_f;
 
 uniform float alpha = 1.0;
 uniform float copies = 4.0;
-uniform string notes = 'copies, use a number that has a square root. Alpha adjusts the alpha level of the copies (recommend 0.5-2.0 recommend)';
+uniform string notes<
+    string widget_type = "info";
+> = 'copies, use a number that has a square root. Alpha adjusts the alpha level of the copies (recommend 0.5-2.0 recommend)';
 
 sampler_state def_sampler {
 	Filter   = Linear;
