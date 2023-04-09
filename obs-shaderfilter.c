@@ -434,49 +434,45 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 							gs_effect_get_default_val(
 								annotation));
 				} else if (strcmp(info.name, "minimum") == 0) {
-					switch (info.type) {
-					case GS_SHADER_PARAM_FLOAT:
+					if (info.type ==
+					    GS_SHADER_PARAM_FLOAT) {
 						cached_data->minimum.f =
 							*(float *)gs_effect_get_default_val(
 								annotation);
-						break;
-					case GS_SHADER_PARAM_INT:
+					} else if (info.type ==
+						   GS_SHADER_PARAM_INT) {
 						cached_data->minimum.i =
 							*(int *)gs_effect_get_default_val(
 								annotation);
-						break;
 					}
 				} else if (strcmp(info.name, "maximum") == 0) {
-					switch (info.type) {
-					case GS_SHADER_PARAM_FLOAT:
+					if (info.type ==
+					    GS_SHADER_PARAM_FLOAT) {
 						cached_data->maximum.f =
 							*(float *)gs_effect_get_default_val(
 								annotation);
-						break;
-					case GS_SHADER_PARAM_INT:
+					} else if (info.type ==
+						   GS_SHADER_PARAM_INT) {
 						cached_data->maximum.i =
 							*(int *)gs_effect_get_default_val(
 								annotation);
-						break;
 					}
 				} else if (strcmp(info.name, "step") == 0) {
-					switch (info.type) {
-					case GS_SHADER_PARAM_FLOAT:
+					if (info.type ==
+					    GS_SHADER_PARAM_FLOAT) {
 						cached_data->step.f =
 							*(float *)gs_effect_get_default_val(
 								annotation);
-						break;
-					case GS_SHADER_PARAM_INT:
+					} else if (info.type ==
+						   GS_SHADER_PARAM_INT) {
 						cached_data->step.i =
 							*(int *)gs_effect_get_default_val(
 								annotation);
-						break;
 					}
 				} else if (strncmp(info.name, "option_", 7) ==
 					   0) {
 					int id = atoi(info.name + 7);
-					switch (info.type) {
-					case GS_SHADER_PARAM_INT: {
+					if (info.type == GS_SHADER_PARAM_INT) {
 						int val =
 							*(int *)gs_effect_get_default_val(
 								annotation);
@@ -485,9 +481,9 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 								->option_values,
 							id);
 						*cd = val;
-						break;
-					}
-					case GS_SHADER_PARAM_STRING: {
+
+					} else if (info.type ==
+						   GS_SHADER_PARAM_STRING) {
 						struct dstr val = {0};
 						dstr_copy(
 							&val,
@@ -498,8 +494,6 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 								->option_labels,
 							id);
 						*cs = val;
-						break;
-					}
 					}
 				}
 			}
