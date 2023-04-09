@@ -17,7 +17,6 @@
 #include <string.h>
 
 #include <util/threading.h>
-#include <windows.h>
 
 /* clang-format off */
 
