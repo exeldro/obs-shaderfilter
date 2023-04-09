@@ -24,41 +24,41 @@
 #define nullptr ((void*)0)
 
 static const char *effect_template_begin =
-"\
-uniform float4x4 ViewProj;\
-uniform texture2d image;\
-\
-uniform float2 uv_offset;\
-uniform float2 uv_scale;\
-uniform float2 uv_pixel_interval;\
-uniform float2 uv_size;\
-uniform float rand_f;\
-uniform float rand_instance_f;\
-uniform float rand_activation_f;\
-uniform float elapsed_time;\
-uniform int loops;\
-uniform float local_time;\
-\
-sampler_state textureSampler{\
-	Filter = Linear;\
-	AddressU = Border;\
-	AddressV = Border;\
-	BorderColor = 00000000;\
-};\
-\
-struct VertData {\
-	float4 pos : POSITION;\
-	float2 uv : TEXCOORD0;\
-};\
-\
-VertData mainTransform(VertData v_in)\
-{\
-	VertData vert_out;\
-	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);\
-	vert_out.uv = v_in.uv * uv_scale + uv_offset;\
-	return vert_out;\
-}\
-\
+"\r\
+uniform float4x4 ViewProj;\r\
+uniform texture2d image;\r\
+\r\
+uniform float2 uv_offset;\r\
+uniform float2 uv_scale;\r\
+uniform float2 uv_pixel_interval;\r\
+uniform float2 uv_size;\r\
+uniform float rand_f;\r\
+uniform float rand_instance_f;\r\
+uniform float rand_activation_f;\r\
+uniform float elapsed_time;\r\
+uniform int loops;\r\
+uniform float local_time;\r\
+\r\
+sampler_state textureSampler{\r\
+	Filter = Linear;\r\
+	AddressU = Border;\r\
+	AddressV = Border;\r\
+	BorderColor = 00000000;\r\
+};\r\
+\r\
+struct VertData {\r\
+	float4 pos : POSITION;\r\
+	float2 uv : TEXCOORD0;\r\
+};\r\
+\r\
+VertData mainTransform(VertData v_in)\r\
+{\r\
+	VertData vert_out;\r\
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);\r\
+	vert_out.uv = v_in.uv * uv_scale + uv_offset;\r\
+	return vert_out;\r\
+}\r\
+\r\
 ";
 
 static const char *effect_template_default_image_shader =
@@ -70,14 +70,14 @@ float4 mainImage(VertData v_in) : TARGET\r\
 ";
 
 static const char *effect_template_end =
-"\
-technique Draw\
-{\
-	pass\
-	{\
-		vertex_shader = mainTransform(v_in);\
-		pixel_shader = mainImage(v_in);\
-	}\
+"\r\
+technique Draw\r\
+{\r\
+	pass\r\
+	{\r\
+		vertex_shader = mainTransform(v_in);\r\
+		pixel_shader = mainImage(v_in);\r\
+	}\r\
 }";
 
 /* clang-format on */
@@ -187,14 +187,16 @@ static unsigned int rand_interval(unsigned int min, unsigned int max)
 
 static char* load_shader_from_file(const char *file_name) // add input of visited files
 {
+
+	char *file_ptr = os_quick_read_utf8_file(file_name);
+	if (file_ptr == NULL)
+		return NULL;
+	char *file = bstrdup(os_quick_read_utf8_file(file_name));
+	char **lines =
+		strlist_split(file, '\n', true);
 	struct dstr shader_file;
 	dstr_init(&shader_file);
-	char *delimeter = "\n";
-	char *file_ptr = os_quick_read_utf8_file(file_name);
-	char *file = bstrdup(file_ptr);
-
-	char **lines = strlist_split(file, '\n', true);
-
+	
 	size_t line_i = 0;
 	while (lines[line_i] != NULL) {
 		char *line = lines[line_i];
@@ -203,21 +205,20 @@ static char* load_shader_from_file(const char *file_name) // add input of visite
 			// Open the included file, place contents here.
 			char *pos = strrchr(file_name, '/');
 			const size_t length = pos - file_name + 1;
-			char include_path[MAX_PATH];
-			strncpy(include_path, file_name, length);
-			include_path[length] = '\0';
+			struct dstr include_path = {0};
+			dstr_ncopy(&include_path, file_name, length);
 			char *start = strchr(line, '"')+1;
 			char *end = strrchr(line, '"');
-			char include_file[MAX_PATH];
-			strncpy(include_file, start, end - start);
-			include_file[end - start] = '\0';
-			strcat(include_path, include_file);
+
+			dstr_ncat(&include_path, start, end - start);
 			char *abs_include_path =
-				os_get_abs_path_ptr(include_path);
+				os_get_abs_path_ptr(include_path.array);
 			char *file_contents =
 				load_shader_from_file(abs_include_path);
 			dstr_cat(&shader_file, file_contents);
 			dstr_cat(&shader_file, "\n");
+			bfree(file_contents);
+			dstr_free(&include_path);
 		} else {
 			// else place current line here.
 			dstr_cat(&shader_file, line);
@@ -243,12 +244,8 @@ static char* load_shader_from_file(const char *file_name) // add input of visite
 	return shader_file.array;
 }
 
-static void shader_filter_reload_effect(struct shader_filter_data *filter)
+static void shader_filter_clear_params(struct shader_filter_data *filter)
 {
-	obs_data_t *settings = obs_source_get_settings(filter->context);
-
-	// First, clean up the old effect and all references to it.
-	filter->shader_start_time = 0.0;
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
 		struct effect_param_data *param =
@@ -271,9 +268,27 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			obs_leave_graphics();
 			param->render = NULL;
 		}
+		dstr_free(&param->name);
+		dstr_free(&param->display_name);
+		dstr_free(&param->widget_type);
+		dstr_free(&param->description);
+		da_free(param->option_values);
+		for (size_t i = 0; i < param->option_labels.num; i++) {
+			dstr_free(&param->option_labels.array[i]);
+		}
+		da_free(param->option_labels);
 	}
 
 	da_free(filter->stored_param_list);
+}
+
+static void shader_filter_reload_effect(struct shader_filter_data *filter)
+{
+	obs_data_t *settings = obs_source_get_settings(filter->context);
+
+	// First, clean up the old effect and all references to it.
+	filter->shader_start_time = 0.0;
+	shader_filter_clear_params(filter);
 
 	filter->param_elapsed_time = NULL;
 	filter->param_uv_offset = NULL;
@@ -302,8 +317,6 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 		const char *file_name =
 			obs_data_get_string(settings, "shader_file_name");
 		shader_text = load_shader_from_file(file_name);
-		printf(shader_text);
-		//load_shader_from_file(file_name, shader_text);
 	} else {
 		shader_text =
 			bstrdup(obs_data_get_string(settings, "shader_text"));
@@ -531,29 +544,7 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 static void shader_filter_destroy(void *data)
 {
 	struct shader_filter_data *filter = data;
-	size_t param_count = filter->stored_param_list.num;
-	for (size_t param_index = 0; param_index < param_count; param_index++) {
-		struct effect_param_data *param =
-			(filter->stored_param_list.array + param_index);
-		if (param->image) {
-			obs_enter_graphics();
-			gs_image_file_free(param->image);
-			obs_leave_graphics();
-
-			bfree(param->image);
-			param->image = NULL;
-		}
-		if (param->source) {
-			obs_weak_source_release(param->source);
-			param->source = NULL;
-		}
-		if (param->render) {
-			obs_enter_graphics();
-			gs_texrender_destroy(param->render);
-			obs_leave_graphics();
-			param->render = NULL;
-		}
-	}
+	shader_filter_clear_params(filter);
 
 	obs_enter_graphics();
 	if (filter->effect)
