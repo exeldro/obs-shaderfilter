@@ -786,7 +786,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 					props, param_name, display_name.array,
 					OBS_COMBO_TYPE_LIST,
 					OBS_COMBO_FORMAT_INT);
-				for (int i = 0; i < param->option_values.num; i++) {
+				for (size_t i = 0; i < param->option_values.num;
+				     i++) {
 					obs_property_list_add_int(
 						plist, option_labels[i].array,
 						options[i]);
