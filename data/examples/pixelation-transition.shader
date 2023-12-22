@@ -12,7 +12,7 @@ uniform float power<
     float minimum = 0.5;
     float maximum = 8.0;
     float step = 0.01;
-> = 3;
+> = 3.0;
 uniform float center_x<
     string label = "X";
     string widget_type = "slider";
@@ -29,16 +29,6 @@ uniform float center_y<
     float maximum = 1.0;
     float step = 0.001;
 > = 0.5;
-
-float srgb_nonlinear_to_linear_channel(float u)
-{
-	return (u <= 0.04045) ? (u / 12.92) : pow((u + 0.055) / 1.055, 2.4);
-}
-
-float3 srgb_nonlinear_to_linear(float3 v)
-{
-	return float3(srgb_nonlinear_to_linear_channel(v.r), srgb_nonlinear_to_linear_channel(v.g), srgb_nonlinear_to_linear_channel(v.b));
-}
 
 float4 mainImage(VertData v_in) : TARGET
 {

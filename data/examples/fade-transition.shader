@@ -9,16 +9,6 @@ uniform float transition_time<
 > = 0.5;
 uniform bool convert_linear = true;
 
-float srgb_nonlinear_to_linear_channel(float u)
-{
-	return (u <= 0.04045) ? (u / 12.92) : pow((u + 0.055) / 1.055, 2.4);
-}
-
-float3 srgb_nonlinear_to_linear(float3 v)
-{
-	return float3(srgb_nonlinear_to_linear_channel(v.r), srgb_nonlinear_to_linear_channel(v.g), srgb_nonlinear_to_linear_channel(v.b));
-}
-
 float4 mainImage(VertData v_in) : TARGET
 {
     float4 a_val = image_a.Sample(textureSampler, v_in.uv);
