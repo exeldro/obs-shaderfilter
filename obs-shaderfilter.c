@@ -117,10 +117,18 @@ struct effect_param_data {
 struct shader_filter_data {
 	obs_source_t *context;
 	gs_effect_t *effect;
+	gs_effect_t *output_effect;
+
+	gs_texrender_t *input_texrender;
+	bool input_texture_generated;
+	gs_texrender_t *output_texrender;
+	gs_eparam_t *param_output_image;
 
 	bool reload_effect;
 	struct dstr last_path;
 	bool last_from_file;
+
+	bool use_pm_alpha;
 
 	//uint64_t shader_last_time;
 	float shader_start_time;
@@ -279,6 +287,50 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 	da_free(filter->stored_param_list);
 }
 
+static void load_output_effect(struct shader_filter_data *filter)
+{
+	if (filter->output_effect != NULL) {
+		obs_enter_graphics();
+		gs_effect_destroy(filter->output_effect);
+		filter->output_effect = NULL;
+		obs_leave_graphics();
+	}
+
+	char *shader_text = NULL;
+	struct dstr filename = {0};
+	dstr_cat(&filename, obs_get_module_data_path(obs_current_module()));
+	dstr_cat(&filename, "/internal/render_output.effect");
+	shader_text = load_shader_from_file(filename.array);
+	char *errors = NULL;
+	dstr_free(&filename);
+
+	obs_enter_graphics();
+	filter->output_effect = gs_effect_create(shader_text, NULL, &errors);
+	obs_leave_graphics();
+
+	bfree(shader_text);
+	if (filter->output_effect == NULL) {
+		blog(LOG_WARNING,
+		     "[obs-shaderfilter] Unable to load output.effect file.  Errors:\n%s",
+		     (errors == NULL || strlen(errors) == 0 ? "(None)"
+							    : errors));
+		bfree(errors);
+	} else {
+		size_t effect_count =
+			gs_effect_get_num_params(filter->output_effect);
+		for (size_t effect_index = 0; effect_index < effect_count;
+		     effect_index++) {
+			gs_eparam_t *param = gs_effect_get_param_by_idx(
+				filter->output_effect, effect_index);
+			struct gs_effect_param_info info;
+			gs_effect_get_param_info(param, &info);
+			if (strcmp(info.name, "output_image") == 0) {
+				filter->param_output_image = param;
+			}
+		}
+	}
+}
+
 static void shader_filter_reload_effect(struct shader_filter_data *filter)
 {
 	obs_data_t *settings = obs_source_get_settings(filter->context);
@@ -344,6 +396,13 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 		dstr_replace(&effect_text, "[loop]", "");
 		dstr_insert(&effect_text, 0, "#define OPENGL 1\n");
 	}
+
+	if (dstr_find(&effect_text, "#define USE_PM_ALPHA 1")) {
+		filter->use_pm_alpha = true;
+	} else {
+		filter->use_pm_alpha = false;
+	}
+
 	if (filter->effect)
 		gs_effect_destroy(filter->effect);
 	filter->effect = gs_effect_create(effect_text.array, NULL, &errors);
@@ -535,7 +594,7 @@ static void *shader_filter_create(obs_data_t *settings, obs_source_t *source)
 		(float)((double)rand_interval(0, 10000) / (double)10000);
 
 	da_init(filter->stored_param_list);
-
+	load_output_effect(filter);
 	obs_source_update(source, settings);
 
 	return filter;
@@ -549,6 +608,13 @@ static void shader_filter_destroy(void *data)
 	obs_enter_graphics();
 	if (filter->effect)
 		gs_effect_destroy(filter->effect);
+	if (filter->output_effect)
+		gs_effect_destroy(filter->output_effect);
+	if (filter->input_texrender)
+		gs_texrender_destroy(filter->input_texrender);
+	if (filter->output_texrender)
+		gs_texrender_destroy(filter->output_texrender);
+
 	obs_leave_graphics();
 
 	dstr_free(&filter->last_path);
@@ -1137,17 +1203,73 @@ static void shader_filter_tick(void *data, float seconds)
 		(float)((double)rand_interval(0, 10000) / (double)10000);
 }
 
-static void shader_filter_render(void *data, gs_effect_t *effect)
+gs_texrender_t *create_or_reset_texrender(gs_texrender_t *render)
 {
-	UNUSED_PARAMETER(effect);
-
-	struct shader_filter_data *filter = data;
-
-	if (filter->effect == NULL || filter->rendering) {
-		obs_source_skip_video_filter(filter->context);
-		return;
+	if (!render) {
+		render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	} else {
+		gs_texrender_reset(render);
 	}
+	return render;
+}
 
+static void get_input_source(struct shader_filter_data *filter)
+{
+	// Use the OBS default effect file as our effect.
+	gs_effect_t *pass_through = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	filter->input_texture_generated = false;
+
+	// Set up our color space info.
+	const enum gs_color_space preferred_spaces[] = {
+		GS_CS_SRGB,
+		GS_CS_SRGB_16F,
+		GS_CS_709_EXTENDED,
+	};
+
+	const enum gs_color_space source_space = obs_source_get_color_space(
+		obs_filter_get_target(filter->context),
+		OBS_COUNTOF(preferred_spaces), preferred_spaces);
+
+	const enum gs_color_format format =
+		gs_get_format_from_space(source_space);
+
+	// Set up our input_texrender to catch the output texture.
+	filter->input_texrender =
+		create_or_reset_texrender(filter->input_texrender);
+
+	// Start the rendering process with our correct color space params,
+	// And set up your texrender to recieve the created texture.
+	if (obs_source_process_filter_begin_with_color_space(
+		    filter->context, format, source_space,
+		    OBS_NO_DIRECT_RENDERING) &&
+	    gs_texrender_begin(filter->input_texrender, filter->total_width,
+			       filter->total_height)) {
+
+		gs_blend_state_push();
+		gs_reset_blend_state();
+		gs_enable_blending(false);
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
+		gs_ortho(0.0f, (float)filter->total_width, 0.0f,
+			 (float)filter->total_height, -100.0f, 100.0f);
+		// The incoming source is pre-multiplied alpha, so use the
+		// OBS default effect "DrawAlphaDivide" technique to convert
+		// the colors back into non-pre-multiplied space. If the shader
+		// file has #define USE_PM_ALPHA 1, then use normal "Draw"
+		// technique.
+		const char *technique =
+			filter->use_pm_alpha ? "Draw" : "DrawAlphaDivide";
+		obs_source_process_filter_tech_end(
+			filter->context, pass_through, filter->total_width,
+			filter->total_height, technique);
+		gs_texrender_end(filter->input_texrender);
+		gs_blend_state_pop();
+		filter->input_texture_generated = true;
+	}
+}
+
+static void draw_output(struct shader_filter_data *filter)
+{
 	const enum gs_color_space preferred_spaces[] = {
 		GS_CS_SRGB,
 		GS_CS_SRGB_16F,
@@ -1163,15 +1285,46 @@ static void shader_filter_render(void *data, gs_effect_t *effect)
 
 	if (!obs_source_process_filter_begin_with_color_space(
 		    filter->context, format, source_space,
-		    //OBS_ALLOW_DIRECT_RENDERING)) {
-		OBS_NO_DIRECT_RENDERING)) {
+		    OBS_ALLOW_DIRECT_RENDERING)) {
 		return;
 	}
-	filter->rendering = true;
+
+	gs_texture_t *texture =
+		gs_texrender_get_texture(filter->output_texrender);
+	gs_effect_t *pass_through = filter->output_effect;
+
+	if (filter->param_output_image) {
+		gs_effect_set_texture(filter->param_output_image, texture);
+	}
 
 	gs_blend_state_push();
 	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
 				   GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+	obs_source_process_filter_end(filter->context, pass_through,
+				      filter->total_width,
+				      filter->total_height);
+	gs_blend_state_pop();
+}
+
+static void render_shader(struct shader_filter_data *filter)
+{
+	gs_texture_t *texture =
+		gs_texrender_get_texture(filter->input_texrender);
+	if (!texture) {
+		return;
+	}
+
+	filter->output_texrender =
+		create_or_reset_texrender(filter->output_texrender);
+	gs_blend_state_push();
+	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
+				   GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+	gs_eparam_t *param_image = gs_effect_get_param_by_name(filter->effect, "image");
+	if (param_image) {
+		gs_effect_set_texture(param_image, texture);
+	}
 
 	if (filter->param_uv_scale != NULL) {
 		gs_effect_set_vec2(filter->param_uv_scale, &filter->uv_scale);
@@ -1318,11 +1471,38 @@ static void shader_filter_render(void *data, gs_effect_t *effect)
 		default:;
 		}
 	}
+	if (gs_texrender_begin(filter->output_texrender, filter->total_width,
+			       filter->total_height)) {
+		gs_ortho(0.0f, (float)filter->total_width, 0.0f,
+			 (float)filter->total_height, -100.0f, 100.0f);
+		while (gs_effect_loop(filter->effect, "Draw"))
+			gs_draw_sprite(texture, 0, filter->total_width,
+				       filter->total_height);
+		gs_texrender_end(filter->output_texrender);
+	}
 
-	obs_source_process_filter_end(filter->context, filter->effect,
-				      filter->total_width,
-				      filter->total_height);
 	gs_blend_state_pop();
+}
+
+static void shader_filter_render(void *data, gs_effect_t *effect)
+{
+	UNUSED_PARAMETER(effect);
+
+	struct shader_filter_data *filter = data;
+
+	if (filter->effect == NULL || filter->rendering) {
+		obs_source_skip_video_filter(filter->context);
+		return;
+	}
+
+	get_input_source(filter);
+
+	filter->rendering = true;
+	//gs_texrender_t *tmp = filter->output_texrender;
+	//filter->output_texrender = filter->input_texrender;
+	//filter->input_texrender = tmp;
+	render_shader(filter);
+	draw_output(filter);
 	filter->rendering = false;
 }
 static uint32_t shader_filter_getwidth(void *data)
