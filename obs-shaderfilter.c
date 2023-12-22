@@ -58,7 +58,18 @@ VertData mainTransform(VertData v_in)\n\
 	return vert_out;\n\
 }\n\
 \n\
-";
+float srgb_nonlinear_to_linear_channel(float u)\n\
+{\n\
+	return (u <= 0.04045) ? (u / 12.92) : pow((u + 0.055) / 1.055, 2.4);\n\
+}\n\
+\n\
+float3 srgb_nonlinear_to_linear(float3 v)\n\
+{\n\
+	return float3(srgb_nonlinear_to_linear_channel(v.r),\n\
+		      srgb_nonlinear_to_linear_channel(v.g),\n\
+		      srgb_nonlinear_to_linear_channel(v.b));\n\
+}\n\
+\n";
 
 static const char *effect_template_default_image_shader = "\n\
 float4 mainImage(VertData v_in) : TARGET\n\
@@ -126,13 +137,12 @@ struct shader_filter_data {
 	bool reload_effect;
 	struct dstr last_path;
 	bool last_from_file;
+	bool transition;
 
 	bool use_pm_alpha;
 	bool rendered;
 
-	//uint64_t shader_last_time;
 	float shader_start_time;
-	//uint64_t shader_duration;
 
 	gs_eparam_t *param_uv_offset;
 	gs_eparam_t *param_uv_scale;
@@ -144,6 +154,11 @@ struct shader_filter_data {
 	gs_eparam_t *param_rand_f;
 	gs_eparam_t *param_rand_instance_f;
 	gs_eparam_t *param_rand_activation_f;
+	gs_eparam_t *param_image;
+	gs_eparam_t *param_image_a;
+	gs_eparam_t *param_image_b;
+	gs_eparam_t *param_transition_time;
+	gs_eparam_t *param_convert_linear;
 
 	int expand_left;
 	int expand_right;
@@ -249,6 +264,22 @@ load_shader_from_file(const char *file_name) // add input of visited files
 
 static void shader_filter_clear_params(struct shader_filter_data *filter)
 {
+	filter->param_elapsed_time = NULL;
+	filter->param_uv_offset = NULL;
+	filter->param_uv_pixel_interval = NULL;
+	filter->param_uv_scale = NULL;
+	filter->param_uv_size = NULL;
+	filter->param_rand_f = NULL;
+	filter->param_rand_activation_f = NULL;
+	filter->param_rand_instance_f = NULL;
+	filter->param_loops = NULL;
+	filter->param_local_time = NULL;
+	filter->param_image = NULL;
+	filter->param_image_a = NULL;
+	filter->param_image_b = NULL;
+	filter->param_transition_time = NULL;
+	filter->param_convert_linear = NULL;
+
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
 		struct effect_param_data *param =
@@ -338,17 +369,6 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	// First, clean up the old effect and all references to it.
 	filter->shader_start_time = 0.0;
 	shader_filter_clear_params(filter);
-
-	filter->param_elapsed_time = NULL;
-	filter->param_uv_offset = NULL;
-	filter->param_uv_pixel_interval = NULL;
-	filter->param_uv_scale = NULL;
-	filter->param_uv_size = NULL;
-	filter->param_rand_f = NULL;
-	filter->param_rand_activation_f = NULL;
-	filter->param_rand_instance_f = NULL;
-	filter->param_loops = NULL;
-	filter->param_local_time = NULL;
 
 	if (filter->effect != NULL) {
 		obs_enter_graphics();
@@ -460,9 +480,22 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			filter->param_loops = param;
 		} else if (strcmp(info.name, "local_time") == 0) {
 			filter->param_local_time = param;
-		} else if (strcmp(info.name, "ViewProj") == 0 ||
-			   strcmp(info.name, "image") == 0) {
+		} else if (strcmp(info.name, "ViewProj") == 0) {
 			// Nothing.
+		} else if (strcmp(info.name, "image") == 0) {
+			filter->param_image = param;
+		} else if (filter->transition &&
+			   strcmp(info.name, "image_a") == 0) {
+			filter->param_image_a = param;
+		} else if (filter->transition &&
+			   strcmp(info.name, "image_b") == 0) {
+			filter->param_image_b = param;
+		} else if (filter->transition &&
+			   strcmp(info.name, "transition_time") == 0) {
+			filter->param_transition_time = param;
+		} else if (filter->transition &&
+			   strcmp(info.name, "convert_linear") == 0) {
+			filter->param_convert_linear = param;
 		} else {
 			struct effect_param_data *cached_data =
 				da_push_back_new(filter->stored_param_list);
@@ -732,18 +765,22 @@ static obs_properties_t *shader_filter_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 	obs_properties_set_param(props, filter, NULL);
 
-	obs_properties_add_int(props, "expand_left",
-			       obs_module_text("ShaderFilter.ExpandLeft"), 0,
-			       9999, 1);
-	obs_properties_add_int(props, "expand_right",
-			       obs_module_text("ShaderFilter.ExpandRight"), 0,
-			       9999, 1);
-	obs_properties_add_int(props, "expand_top",
-			       obs_module_text("ShaderFilter.ExpandTop"), 0,
-			       9999, 1);
-	obs_properties_add_int(props, "expand_bottom",
-			       obs_module_text("ShaderFilter.ExpandBottom"), 0,
-			       9999, 1);
+	if (!filter || !filter->transition) {
+		obs_properties_add_int(
+			props, "expand_left",
+			obs_module_text("ShaderFilter.ExpandLeft"), 0, 9999, 1);
+		obs_properties_add_int(
+			props, "expand_right",
+			obs_module_text("ShaderFilter.ExpandRight"), 0, 9999,
+			1);
+		obs_properties_add_int(
+			props, "expand_top",
+			obs_module_text("ShaderFilter.ExpandTop"), 0, 9999, 1);
+		obs_properties_add_int(
+			props, "expand_bottom",
+			obs_module_text("ShaderFilter.ExpandBottom"), 0, 9999,
+			1);
+	}
 
 	obs_properties_add_bool(
 		props, "override_entire_effect",
@@ -1159,7 +1196,9 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 static void shader_filter_tick(void *data, float seconds)
 {
 	struct shader_filter_data *filter = data;
-	obs_source_t *target = obs_filter_get_target(filter->context);
+	obs_source_t *target = filter->transition
+				       ? filter->context
+				       : obs_filter_get_target(filter->context);
 	if (!target)
 		return;
 	// Determine offsets from expansion values.
@@ -1240,10 +1279,13 @@ static void get_input_source(struct shader_filter_data *filter)
 
 	// Start the rendering process with our correct color space params,
 	// And set up your texrender to recieve the created texture.
-	if (obs_source_process_filter_begin_with_color_space(
+	if (!filter->transition &&
+	    !obs_source_process_filter_begin_with_color_space(
 		    filter->context, format, source_space,
-		    OBS_NO_DIRECT_RENDERING) &&
-	    gs_texrender_begin(filter->input_texrender, filter->total_width,
+		    OBS_NO_DIRECT_RENDERING))
+		return;
+
+	if (gs_texrender_begin(filter->input_texrender, filter->total_width,
 			       filter->total_height)) {
 
 		gs_blend_state_push();
@@ -1260,9 +1302,12 @@ static void get_input_source(struct shader_filter_data *filter)
 		// technique.
 		const char *technique =
 			filter->use_pm_alpha ? "Draw" : "DrawAlphaDivide";
-		obs_source_process_filter_tech_end(
-			filter->context, pass_through, filter->total_width,
-			filter->total_height, technique);
+		if (!filter->transition)
+			obs_source_process_filter_tech_end(filter->context,
+							   pass_through,
+							   filter->total_width,
+							   filter->total_height,
+							   technique);
 		gs_texrender_end(filter->input_texrender);
 		gs_blend_state_pop();
 	}
@@ -1307,24 +1352,8 @@ static void draw_output(struct shader_filter_data *filter)
 	gs_blend_state_pop();
 }
 
-static void render_shader(struct shader_filter_data *filter)
+void shader_filter_set_effect_params(struct shader_filter_data *filter)
 {
-	gs_texture_t *texture =
-		gs_texrender_get_texture(filter->input_texrender);
-	if (!texture) {
-		return;
-	}
-
-	filter->output_texrender =
-		create_or_reset_texrender(filter->output_texrender);
-	gs_blend_state_push();
-	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
-				   GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
-
-	gs_eparam_t *param_image = gs_effect_get_param_by_name(filter->effect, "image");
-	if (param_image) {
-		gs_effect_set_texture(param_image, texture);
-	}
 
 	if (filter->param_uv_scale != NULL) {
 		gs_effect_set_vec2(filter->param_uv_scale, &filter->uv_scale);
@@ -1471,6 +1500,27 @@ static void render_shader(struct shader_filter_data *filter)
 		default:;
 		}
 	}
+}
+
+static void render_shader(struct shader_filter_data *filter)
+{
+	gs_texture_t *texture =
+		gs_texrender_get_texture(filter->input_texrender);
+	if (!texture) {
+		return;
+	}
+
+	filter->output_texrender =
+		create_or_reset_texrender(filter->output_texrender);
+	gs_blend_state_push();
+	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
+				   GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+
+	if (filter->param_image) {
+		gs_effect_set_texture(filter->param_image, texture);
+	}
+	shader_filter_set_effect_params(filter);
+
 	gs_blend_state_push();
 	gs_reset_blend_state();
 	gs_enable_blending(false);
@@ -1568,6 +1618,153 @@ struct obs_source_info shader_filter = {
 	.video_get_color_space = shader_filter_get_color_space,
 };
 
+static void *shader_transition_create(obs_data_t *settings,
+				      obs_source_t *source)
+{
+	struct shader_filter_data *filter =
+		bzalloc(sizeof(struct shader_filter_data));
+	filter->context = source;
+	filter->reload_effect = true;
+	filter->transition = true;
+
+	dstr_init(&filter->last_path);
+	dstr_copy(&filter->last_path,
+		  obs_data_get_string(settings, "shader_file_name"));
+	filter->last_from_file = obs_data_get_bool(settings, "from_file");
+	filter->rand_instance_f =
+		(float)((double)rand_interval(0, 10000) / (double)10000);
+	filter->rand_activation_f =
+		(float)((double)rand_interval(0, 10000) / (double)10000);
+
+	da_init(filter->stored_param_list);
+
+	obs_source_update(source, settings);
+
+	return filter;
+}
+
+static const char *shader_transition_get_name(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	return obs_module_text("ShaderFilter");
+}
+
+static float mix_a(void *data, float t)
+{
+	UNUSED_PARAMETER(data);
+	return 1.0f - t;
+}
+
+static float mix_b(void *data, float t)
+{
+	UNUSED_PARAMETER(data);
+	return t;
+}
+
+static bool shader_transition_audio_render(void *data, uint64_t *ts_out,
+					   struct obs_source_audio_mix *audio,
+					   uint32_t mixers, size_t channels,
+					   size_t sample_rate)
+{
+	struct shader_filter_data *filter = data;
+	return obs_transition_audio_render(filter->context, ts_out, audio,
+					   mixers, channels, sample_rate, mix_a,
+					   mix_b);
+}
+
+static void shader_transition_video_callback(void *data, gs_texture_t *a,
+					     gs_texture_t *b, float t,
+					     uint32_t cx, uint32_t cy)
+{
+	if (!a && !b)
+		return;
+
+	struct shader_filter_data *filter = data;
+	if (filter->effect == NULL || filter->rendering)
+		return;
+
+	const bool previous = gs_framebuffer_srgb_enabled();
+	gs_enable_framebuffer_srgb(true);
+
+	if (gs_get_color_space() == GS_CS_SRGB) {
+		if (filter->param_image_a != NULL)
+			gs_effect_set_texture(filter->param_image_a, a);
+		if (filter->param_image_b != NULL)
+			gs_effect_set_texture(filter->param_image_b, b);
+		if (filter->param_image != NULL)
+			gs_effect_set_texture(filter->param_image,
+					      t < 0.5 ? a : b);
+		if (filter->param_convert_linear)
+			gs_effect_set_bool(filter->param_convert_linear, true);
+	} else {
+		if (filter->param_image_a != NULL)
+			gs_effect_set_texture_srgb(filter->param_image_a, a);
+		if (filter->param_image_b != NULL)
+			gs_effect_set_texture_srgb(filter->param_image_b, b);
+		if (filter->param_image != NULL)
+			gs_effect_set_texture_srgb(filter->param_image,
+						   t < 0.5 ? a : b);
+		if (filter->param_convert_linear)
+			gs_effect_set_bool(filter->param_convert_linear, false);
+	}
+	if (filter->param_transition_time != NULL)
+		gs_effect_set_float(filter->param_transition_time, t);
+
+	shader_filter_set_effect_params(filter);
+
+	while (gs_effect_loop(filter->effect, "Draw"))
+		gs_draw_sprite(NULL, 0, cx, cy);
+
+	gs_enable_framebuffer_srgb(previous);
+}
+
+static void shader_transition_video_render(void *data, gs_effect_t *effect)
+{
+	UNUSED_PARAMETER(effect);
+
+	const bool previous = gs_set_linear_srgb(true);
+
+	struct shader_filter_data *filter = data;
+	obs_transition_video_render2(filter->context,
+				     shader_transition_video_callback, NULL);
+
+	gs_set_linear_srgb(previous);
+}
+
+static enum gs_color_space
+shader_transition_get_color_space(void *data, size_t count,
+				  const enum gs_color_space *preferred_spaces)
+{
+	struct shader_filter_data *filter = data;
+	const enum gs_color_space transition_space =
+		obs_transition_video_get_color_space(filter->context);
+
+	enum gs_color_space space = transition_space;
+	for (size_t i = 0; i < count; ++i) {
+		space = preferred_spaces[i];
+		if (space == transition_space)
+			break;
+	}
+
+	return space;
+}
+
+struct obs_source_info shader_transition = {
+	.id = "shader_transition",
+	.type = OBS_SOURCE_TYPE_TRANSITION,
+	.create = shader_transition_create,
+	.destroy = shader_filter_destroy,
+	.update = shader_filter_update,
+	.load = shader_filter_update,
+	.video_tick = shader_filter_tick,
+	.get_name = shader_transition_get_name,
+	.audio_render = shader_transition_audio_render,
+	.get_defaults = shader_filter_defaults,
+	.video_render = shader_transition_video_render,
+	.get_properties = shader_filter_properties,
+	.video_get_color_space = shader_transition_get_color_space,
+};
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-shaderfilter", "en-US")
 
@@ -1575,6 +1772,7 @@ bool obs_module_load(void)
 {
 	blog(LOG_INFO, "[obs-shaderfilter] loaded version %s", PROJECT_VERSION);
 	obs_register_source(&shader_filter);
+	obs_register_source(&shader_transition);
 
 	return true;
 }
