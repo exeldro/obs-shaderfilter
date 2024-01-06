@@ -1471,6 +1471,10 @@ static void render_shader(struct shader_filter_data *filter)
 		default:;
 		}
 	}
+	gs_blend_state_push();
+	gs_reset_blend_state();
+	gs_enable_blending(false);
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 	if (gs_texrender_begin(filter->output_texrender, filter->total_width,
 			       filter->total_height)) {
 		gs_ortho(0.0f, (float)filter->total_width, 0.0f,
