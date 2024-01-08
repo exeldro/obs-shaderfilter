@@ -1512,9 +1512,6 @@ static void render_shader(struct shader_filter_data *filter)
 
 	filter->output_texrender =
 		create_or_reset_texrender(filter->output_texrender);
-	gs_blend_state_push();
-	gs_blend_function_separate(GS_BLEND_SRCALPHA, GS_BLEND_INVSRCALPHA,
-				   GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 
 	if (filter->param_image) {
 		gs_effect_set_texture(filter->param_image, texture);
@@ -1525,6 +1522,7 @@ static void render_shader(struct shader_filter_data *filter)
 	gs_reset_blend_state();
 	gs_enable_blending(false);
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
 	if (gs_texrender_begin(filter->output_texrender, filter->total_width,
 			       filter->total_height)) {
 		gs_ortho(0.0f, (float)filter->total_width, 0.0f,
