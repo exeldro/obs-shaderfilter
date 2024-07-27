@@ -2535,13 +2535,14 @@ static void get_input_source(struct shader_filter_data *filter)
 	// Start the rendering process with our correct color space params,
 	// And set up your texrender to recieve the created texture.
 	if (!filter->transition &&
-	    !obs_source_process_filter_begin_with_color_space(filter->context, format, source_space, OBS_NO_DIRECT_RENDERING))
+		!obs_source_process_filter_begin_with_color_space(filter->context, format, source_space, OBS_NO_DIRECT_RENDERING))
 		return;
 
 	if (gs_texrender_begin(filter->input_texrender, filter->total_width, filter->total_height)) {
 
 		gs_blend_state_push();
 		gs_reset_blend_state();
+		gs_blend_op(GS_BLEND_OP_ADD);
 		gs_enable_blending(false);
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 
@@ -2724,13 +2725,21 @@ static void render_shader(struct shader_filter_data *filter)
 
 	gs_blend_state_push();
 	gs_reset_blend_state();
+	gs_blend_op(GS_BLEND_OP_ADD);
 	gs_enable_blending(false);
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
 
 	if (gs_texrender_begin(filter->output_texrender, filter->total_width, filter->total_height)) {
 		gs_ortho(0.0f, (float)filter->total_width, 0.0f, (float)filter->total_height, -100.0f, 100.0f);
-		while (gs_effect_loop(filter->effect, "Draw"))
+		bool first_iteration = true;
+		while (gs_effect_loop(filter->effect, "Draw")) {
 			gs_draw_sprite(texture, 0, filter->total_width, filter->total_height);
+			if (first_iteration) {
+				gs_enable_blending(true);
+				gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+				first_iteration = false;
+			}
+		}
 		gs_texrender_end(filter->output_texrender);
 	}
 
