@@ -19,10 +19,10 @@ uniform float offsetIntensity<
 uniform int noiseQuality<
     string label = "Noise number of lines (250)";
     string widget_type = "slider";
-    int minimum = 1.0;
-    float maximum = 1000.0;
-    float step = 10.0;
-> = 250.0;
+    int minimum = 1;
+    int maximum = 1000;
+    int step = 10;
+> = 250;
 uniform float noiseIntensity<
     string label = "Noise intensity (0.88)";
     string widget_type = "slider";
