@@ -1,4 +1,4 @@
-// Smart DeNoise By Michele Morrone (https://github.com/BrutPitt/glslSmartDeNoise)  July 15, 2024
+// Smart DeNoise By Michele Morrone (https://github.com/BrutPitt/glslSmartDeNoise)
 // Converted to OBS version of HLSL by Euiko on February 10, 2025
 
 #define INV_SQRT_OF_2PI 0.39894228040143267793994605993439  // 1.0/SQRT_OF_2PI
@@ -10,7 +10,7 @@ uniform float uSigma<
     float minimum = 0.01;
     float maximum = 3;  // max based on the webgl sample, which is 3 
     float step = 0.01;
-> = 1.0;  // default value set to 1 to make it lighter
+> = 5.0;  // default value based on shadertoy
 uniform float uKSigma<
     string label = "K-Sigma";
     string widget_type = "slider";
@@ -36,13 +36,8 @@ uniform float uThreshold<
 //  float threshold   - edge sharpening threshold 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 // NOTE: image's texture2d data will be supplied by the OBS shaderfilter by default
-float4 smartDeNoise(
-    float2 uv,
-    float2 size,
-    float sigma,
-    float kSigma,
-    float threshold
-) {
+float4 smartDeNoise(float2 uv, float2 size, float sigma, float kSigma, float threshold)
+{
     float radius = round(kSigma * sigma);
     float radQ = radius * radius;
 
