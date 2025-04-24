@@ -1,0 +1,51 @@
+// repeat_grid_center_crop.effect
+
+uniform float4x4 ViewProj;
+uniform texture2d image;
+sampler_state def_sampler {
+    Filter   = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+uniform float alpha = 1.0;
+uniform float columns = 3.0;
+uniform float rows = 1.0;
+
+struct VertInOut {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertInOut VSDefault(VertInOut vert_in) {
+    VertInOut vert_out;
+    vert_out.pos = mul(float4(vert_in.pos.xyz, 1), ViewProj);
+    vert_out.uv = vert_in.uv * float2(columns, rows);
+    return vert_out;
+}
+
+float4 PSMain(VertInOut vert_in) : TARGET {
+    // Calculate fractional UV within grid cell
+    float2 cell_uv = frac(vert_in.uv);
+    
+    // Calculate center crop parameters
+    float horizontalCropStart = 0.5 - 0.5/columns;
+    
+    // Map to centered portion of original image
+    float2 original_uv = float2(
+        cell_uv.x / columns + horizontalCropStart,
+        cell_uv.y / rows
+    );
+    
+    // Sample the image
+    float4 col = image.Sample(def_sampler, original_uv);
+    col.a *= alpha;
+    return col;
+}
+
+technique Draw {
+    pass {
+        vertex_shader = VSDefault(vert_in);
+        pixel_shader  = PSMain(vert_in);
+    }
+}
