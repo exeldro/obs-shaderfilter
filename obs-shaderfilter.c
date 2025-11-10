@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
+#include <math.h>
 
 #include <util/threading.h>
 #ifdef _WIN32
@@ -225,6 +226,8 @@ struct shader_filter_data {
 	gs_eparam_t *param_transition_time;
 	gs_eparam_t *param_convert_linear;
 	gs_eparam_t *param_previous_output;
+	gs_eparam_t *param_audio_peak;
+	gs_eparam_t *param_audio_magnitude;
 
 	int expand_left;
 	int expand_right;
@@ -247,6 +250,13 @@ struct shader_filter_data {
 	float rand_f;
 	float rand_instance_f;
 	float rand_activation_f;
+	float audio_peak;
+	float audio_magnitude;
+
+	char *audio_source_name;
+	obs_volmeter_t *volmeter;
+	float current_audio_peak;
+	float current_audio_magnitude;
 
 	DARRAY(struct effect_param_data) stored_param_list;
 };
@@ -351,6 +361,8 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 	filter->param_loops = NULL;
 	filter->param_loop_second = NULL;
 	filter->param_local_time = NULL;
+	filter->param_audio_peak = NULL;
+	filter->param_audio_magnitude = NULL;
 	filter->param_image = NULL;
 	filter->param_previous_image = NULL;
 	filter->param_image_a = NULL;
@@ -612,6 +624,10 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			filter->param_loop_second = param;
 		} else if (strcmp(info.name, "local_time") == 0) {
 			filter->param_local_time = param;
+		} else if (strcmp(info.name, "audio_peak") == 0) {
+			filter->param_audio_peak = param;
+		} else if (strcmp(info.name, "audio_magnitude") == 0) {
+			filter->param_audio_magnitude = param;
 		} else if (strcmp(info.name, "ViewProj") == 0) {
 			// Nothing.
 		} else if (strcmp(info.name, "image") == 0) {
@@ -741,6 +757,11 @@ static void shader_filter_destroy(void *data)
 
 	dstr_free(&filter->last_path);
 	da_free(filter->stored_param_list);
+
+	if (filter->volmeter)
+		obs_volmeter_destroy(filter->volmeter);
+	if (filter->audio_source_name)
+		bfree(filter->audio_source_name);
 
 	bfree(filter);
 }
@@ -2097,6 +2118,53 @@ static bool shader_filter_convert(obs_properties_t *props, obs_property_t *prope
 
 static const char *shader_filter_texture_file_filter = "Textures (*.bmp *.tga *.png *.jpeg *.jpg *.gif);;";
 
+#define MIN_AUDIO_THRESHOLD -60.0f
+
+static float convert_db_to_linear(float db_value)
+{
+	if (db_value <= MIN_AUDIO_THRESHOLD || db_value > 0.0f)
+		return 0.0f;
+
+	return fmaxf(0.0f, fminf(1.0f, (db_value - MIN_AUDIO_THRESHOLD) / (-MIN_AUDIO_THRESHOLD)));
+}
+
+static void shader_filter_audio_callback(void *data, const float magnitude[MAX_AUDIO_CHANNELS],
+					 const float peak[MAX_AUDIO_CHANNELS], const float input_peak[MAX_AUDIO_CHANNELS])
+{
+	UNUSED_PARAMETER(input_peak);
+	struct shader_filter_data *filter = (struct shader_filter_data *)data;
+
+	float max_peak = MIN_AUDIO_THRESHOLD;
+	for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+		if (peak[i] > max_peak && peak[i] != 0.0f) {
+			max_peak = peak[i];
+		}
+	}
+
+	float max_magnitude = MIN_AUDIO_THRESHOLD;
+	for (int i = 0; i < MAX_AUDIO_CHANNELS; i++) {
+		if (magnitude[i] > max_magnitude && magnitude[i] != 0.0f) {
+			max_magnitude = magnitude[i];
+		}
+	}
+
+	filter->current_audio_peak = convert_db_to_linear(max_peak);
+	filter->current_audio_magnitude = convert_db_to_linear(max_magnitude);
+}
+
+static bool shader_filter_enum_audio_sources(void *data, obs_source_t *source)
+{
+	obs_property_t *prop = (obs_property_t *)data;
+	uint32_t flags = obs_source_get_output_flags(source);
+
+	if ((flags & OBS_SOURCE_AUDIO) != 0) {
+		const char *name = obs_source_get_name(source);
+		obs_property_list_add_string(prop, name, name);
+	}
+
+	return true;
+}
+
 static obs_properties_t *shader_filter_properties(void *data)
 {
 	struct shader_filter_data *filter = data;
@@ -2149,6 +2217,14 @@ static obs_properties_t *shader_filter_properties(void *data)
 
 	obs_properties_add_button(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),
 				  shader_filter_reload_effect_clicked);
+
+	if (filter && (filter->param_audio_magnitude || filter->param_audio_peak)) {
+		obs_property_t *audio_source = obs_properties_add_list(props, "audio_source", "Audio source", OBS_COMBO_TYPE_LIST,
+								       OBS_COMBO_FORMAT_STRING);
+		obs_property_list_add_string(audio_source, "None", "");
+
+		obs_enum_sources(shader_filter_enum_audio_sources, audio_source);
+	}
 
 	DARRAY(obs_property_t *) groups;
 	da_init(groups);
@@ -2391,6 +2467,56 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 		filter->reload_effect = false;
 		shader_filter_reload_effect(filter);
 		obs_source_update_properties(filter->context);
+	}
+
+	if (filter->param_audio_magnitude || filter->param_audio_peak) {
+		const char *audio_source_name = obs_data_get_string(settings, "audio_source");
+		if (!filter->audio_source_name || strcmp(filter->audio_source_name, audio_source_name) != 0) {
+			obs_source_t *audio_source = strlen(audio_source_name) > 0 ? obs_get_source_by_name(audio_source_name) : NULL;
+			if (audio_source && ((obs_source_get_output_flags(audio_source) & OBS_SOURCE_AUDIO) == 0)) {
+				obs_source_release(audio_source);
+				audio_source = NULL;
+			}
+			if (audio_source) {
+				if (filter->audio_source_name)
+					bfree(filter->audio_source_name);
+				filter->audio_source_name = bstrdup(audio_source_name);
+			}
+
+			if (!audio_source) {
+				audio_source = obs_source_get_ref(obs_filter_get_parent(filter->context));
+				if (audio_source && ((obs_source_get_output_flags(audio_source) & OBS_SOURCE_AUDIO) == 0)) {
+					obs_source_release(audio_source);
+					audio_source = NULL;
+				}
+			}
+			if (audio_source) {
+				if (!filter->volmeter) {
+					filter->volmeter = obs_volmeter_create(OBS_FADER_LOG);
+					obs_volmeter_add_callback(filter->volmeter, shader_filter_audio_callback, filter);
+				}
+				obs_volmeter_attach_source(filter->volmeter, audio_source);
+				obs_source_release(audio_source);
+			} else {
+				if (filter->volmeter) {
+					obs_volmeter_destroy(filter->volmeter);
+					filter->volmeter = NULL;
+				}
+				if (filter->audio_source_name) {
+					bfree(filter->audio_source_name);
+					filter->audio_source_name = NULL;
+				}
+			}
+		}
+	} else {
+		if (filter->volmeter) {
+			obs_volmeter_destroy(filter->volmeter);
+			filter->volmeter = NULL;
+		}
+		if (filter->audio_source_name) {
+			bfree(filter->audio_source_name);
+			filter->audio_source_name = NULL;
+		}
 	}
 
 	size_t param_count = filter->stored_param_list.num;
@@ -2664,6 +2790,14 @@ static void shader_filter_tick(void *data, float seconds)
 	// undecided between this and "rand_float(1);"
 	filter->rand_f = (float)((double)rand_interval(0, 10000) / (double)10000);
 
+	if (filter->volmeter) {
+		filter->audio_peak = filter->current_audio_peak;
+		filter->audio_magnitude = filter->current_audio_magnitude;
+	} else {
+		filter->audio_peak = 0.0f;
+		filter->audio_magnitude = 0.0f;
+	}
+
 	filter->output_rendered = false;
 	filter->input_rendered = false;
 }
@@ -2831,6 +2965,12 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 	}
 	if (filter->param_local_time != NULL) {
 		gs_effect_set_float(filter->param_local_time, filter->local_time);
+	}
+	if (filter->param_audio_peak != NULL) {
+		gs_effect_set_float(filter->param_audio_peak, filter->audio_peak);
+	}
+	if (filter->param_audio_magnitude != NULL) {
+		gs_effect_set_float(filter->param_audio_magnitude, filter->audio_magnitude);
 	}
 	if (filter->param_loops != NULL) {
 		gs_effect_set_int(filter->param_loops, filter->loops);
