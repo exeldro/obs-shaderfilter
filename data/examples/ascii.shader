@@ -58,8 +58,8 @@ float2 mod(float2 x, float2 y)
 
 float4 mainImage( VertData v_in ) : TARGET
 {
-    float2 iResolution = uv_size*uv_scale;
-    float2 pix = v_in.pos.xy;
+    float2 iResolution = uv_size;
+    float2 pix = v_in.uv * iResolution;
     float4 c = image.Sample(textureSampler, floor(pix/float2(scale*8.0,scale*8.0))*float2(scale*8.0,scale*8.0)/iResolution.xy);
 
     float gray = 0.3 * c.r + 0.59 * c.g + 0.11 * c.b;
