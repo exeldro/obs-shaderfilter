@@ -3204,6 +3204,50 @@ void shader_filter_hide(void *data)
 	shader_filter_param_source_action(data, obs_source_dec_showing);
 }
 
+static void missing_file_callback(void *src, const char *new_path, void *data)
+{
+	struct shader_filter_data *filter = src;
+	const char *setting_name = data;
+	obs_data_t *settings = obs_source_get_settings(filter->context);
+	obs_data_set_string(settings, setting_name, new_path);
+	obs_source_update(filter->context, settings);
+	obs_data_release(settings);
+}
+
+obs_missing_files_t *shader_filter_missing_files(void *data)
+{
+	struct shader_filter_data *filter = data;
+	obs_missing_files_t *files = obs_missing_files_create();
+	obs_data_t *settings = obs_source_get_settings(filter->context);
+	if (obs_data_get_bool(settings, "from_file")) {
+		const char *file_name = obs_data_get_string(settings, "shader_file_name");
+		if (file_name && strlen(file_name) > 0 && !os_file_exists(file_name)) {
+			obs_missing_file_t *file = obs_missing_file_create(
+				file_name, missing_file_callback, OBS_MISSING_FILE_SOURCE, filter->context, "shader_file_name");
+			obs_missing_files_add_file(files, file);
+		}
+	}
+	size_t param_count = filter->stored_param_list.num;
+	for (size_t param_index = 0; param_index < param_count; param_index++) {
+		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
+		if (param->type != GS_SHADER_PARAM_TEXTURE)
+			continue;
+		const char *widget_type = param->widget_type.array;
+		if (widget_type && strcmp(widget_type, "source") == 0)
+			continue;
+		const char *param_name = param->name.array;
+		const char *path = obs_data_get_string(settings, param_name);
+		if (path && strlen(path) > 0 && !os_file_exists(path)) {
+			obs_missing_file_t *file = obs_missing_file_create(path, missing_file_callback, OBS_MISSING_FILE_SOURCE,
+									   filter->context, param->name.array);
+
+			obs_missing_files_add_file(files, file);
+		}
+	}
+	obs_data_release(settings);
+	return files;
+}
+
 struct obs_source_info shader_filter = {
 	.id = "shader_filter",
 	.type = OBS_SOURCE_TYPE_FILTER,
@@ -3224,6 +3268,7 @@ struct obs_source_info shader_filter = {
 	.deactivate = shader_filter_deactivate,
 	.show = shader_filter_show,
 	.hide = shader_filter_hide,
+	.missing_files = shader_filter_missing_files,
 };
 
 static void *shader_transition_create(obs_data_t *settings, obs_source_t *source)
@@ -3374,6 +3419,7 @@ struct obs_source_info shader_transition = {
 	.video_render = shader_transition_video_render,
 	.get_properties = shader_filter_properties,
 	.video_get_color_space = shader_transition_get_color_space,
+	.missing_files = shader_filter_missing_files,
 };
 
 OBS_DECLARE_MODULE()
