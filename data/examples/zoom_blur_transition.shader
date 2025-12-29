@@ -35,7 +35,7 @@ float Sinusoidal_easeInOut(in float begin, in float change, in float duration, i
 }
 
 float random(in float3 scale, in float seed) {
-    return frac(sin(dot(0 + seed, scale)) * 43758.5453 + seed);
+    return frac(sin(dot(float3(seed, seed, seed), scale)) * 43758.5453 + seed);
 }
 
 float3 crossFade(in float2 uv, in float dissolve) {
