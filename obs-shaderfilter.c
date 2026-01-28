@@ -1999,11 +1999,11 @@ static bool shader_filter_convert(obs_properties_t *props, obs_property_t *prope
 		dstr_cat(&insert_text, "#define mat4 float4x4\n");
 
 	if (dstr_find(&effect_text, "mod("))
-		dstr_cat(&insert_text, "#define mod(x,y) (x - y * floor(x / y))\n");
+		dstr_cat(&insert_text, "#define mod(x,y) ((x) - (y) * floor((x) / (y)))\n");
 	if (dstr_find(&effect_text, "lessThan("))
-		dstr_cat(&insert_text, "#define lessThan(a,b) (a < b)\n");
+		dstr_cat(&insert_text, "#define lessThan(a,b) ((a) < (b))\n");
 	if (dstr_find(&effect_text, "greaterThan("))
-		dstr_cat(&insert_text, "#define greaterThan(a,b) (a > b)\n");
+		dstr_cat(&insert_text, "#define greaterThan(a,b) ((a) > (b))\n");
 	dstr_cat(&insert_text, "#endif\n");
 
 	if (dstr_find(&effect_text, "iMouse") && !dstr_find(&effect_text, "float2 iMouse"))
