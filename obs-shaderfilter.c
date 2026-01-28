@@ -1600,7 +1600,14 @@ static void convert_return(struct dstr *effect_text, struct dstr *var_name, size
 			ch++;
 
 		if (*ch == '=' || (*(ch + 1) == '=' && (*ch == '*' || *ch == '/' || *ch == '+' || *ch == '-'))) {
-			count++;
+			char *bpos = pos - 1;
+			while (*bpos != '\n' && (*bpos != '/' || *(bpos + 1) != '/') && bpos > effect_text->array)
+				bpos--;
+			if (*bpos == '/' && *(bpos + 1) == '/') {
+				//comment line
+			} else {
+				count++;
+			}
 		}
 
 		pos = strstr(effect_text->array + diff + var_name->len, var_name->array);
@@ -1610,10 +1617,18 @@ static void convert_return(struct dstr *effect_text, struct dstr *var_name, size
 	if (count == 1) {
 		pos = strstr(effect_text->array + main_diff, var_name->array);
 		while (pos) {
-			if (is_var_char(*(pos - 1)) || (*(pos - 1) == '/' && *(pos - 2) == '/')) {
+			if (is_var_char(*(pos - 1))) {
 				pos = strstr(pos + var_name->len, var_name->array);
 				continue;
 			}
+			char *bpos = pos - 1;
+			while (*bpos != '\n' && (*bpos != '/' || *(bpos + 1) != '/') && bpos > effect_text->array)
+				bpos--;
+			if (*bpos == '/' && *(bpos + 1) == '/') {
+				pos = strstr(pos + var_name->len, var_name->array);
+				continue;
+			}
+
 			size_t diff = pos - effect_text->array;
 			char *ch = pos + var_name->len;
 			if (*ch == '.') {
