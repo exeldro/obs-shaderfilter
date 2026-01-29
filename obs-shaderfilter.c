@@ -1631,10 +1631,15 @@ static void convert_return(struct dstr *effect_text, struct dstr *var_name, size
 
 			size_t diff = pos - effect_text->array;
 			char *ch = pos + var_name->len;
+			bool contains_alpha = true;
 			if (*ch == '.') {
+				contains_alpha = false;
 				ch++;
-				while (is_var_char(*ch))
+				while (is_var_char(*ch)) {
+					if (*ch == 'a' || *ch == 'A' || *ch == 'w' || *ch == 'W')
+						contains_alpha = true;
 					ch++;
+				}
 			}
 
 			while (*ch == ' ' || *ch == '\t')
@@ -1642,11 +1647,25 @@ static void convert_return(struct dstr *effect_text, struct dstr *var_name, size
 
 			if (*ch == '=') {
 				dstr_remove(effect_text, diff, ch - pos + 1);
-				dstr_insert(effect_text, diff, "return ");
+				if (!contains_alpha) {
+					dstr_insert(effect_text, diff, "return float4(");
+					while (diff < effect_text->len && effect_text->array[diff] != ';')
+						diff++;
+					dstr_insert(effect_text, diff, ",1.0)");
+				} else {
+					dstr_insert(effect_text, diff, "return ");
+				}
 				return;
 			} else if (*(ch + 1) == '=' && (*ch == '*' || *ch == '/' || *ch == '+' || *ch == '-')) {
 				dstr_remove(effect_text, diff, ch - pos + 2);
-				dstr_insert(effect_text, diff, "return ");
+				if (!contains_alpha) {
+					dstr_insert(effect_text, diff, "return float4(");
+					while (diff < effect_text->len && effect_text->array[diff] != ';')
+						diff++;
+					dstr_insert(effect_text, diff, ",1.0)");
+				} else {
+					dstr_insert(effect_text, diff, "return ");
+				}
 				return;
 			}
 
@@ -2487,7 +2506,8 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 	if (filter->param_audio_magnitude || filter->param_audio_peak) {
 		const char *audio_source_name = obs_data_get_string(settings, "audio_source");
 		if (!filter->audio_source_name || strcmp(filter->audio_source_name, audio_source_name) != 0) {
-			obs_source_t *audio_source = strlen(audio_source_name) > 0 ? obs_get_source_by_name(audio_source_name) : NULL;
+			obs_source_t *audio_source = strlen(audio_source_name) > 0 ? obs_get_source_by_name(audio_source_name)
+										   : NULL;
 			if (audio_source && ((obs_source_get_output_flags(audio_source) & OBS_SOURCE_AUDIO) == 0)) {
 				obs_source_release(audio_source);
 				audio_source = NULL;
