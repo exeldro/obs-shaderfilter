@@ -123,6 +123,7 @@ struct effect_param_data {
 	struct dstr widget_type;
 	struct dstr group;
 	struct dstr path;
+	struct dstr tooltip;
 	DARRAY(int) option_values;
 	DARRAY(struct dstr) option_labels;
 
@@ -405,6 +406,7 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 		dstr_free(&param->widget_type);
 		dstr_free(&param->group);
 		dstr_free(&param->path);
+		dstr_free(&param->tooltip);
 		da_free(param->option_values);
 		for (size_t i = 0; i < param->option_labels.num; i++) {
 			dstr_free(&param->option_labels.array[i]);
@@ -664,6 +666,8 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 					dstr_copy(&cached_data->widget_type, (const char *)annotation_default);
 				} else if (strcmp(info.name, "group") == 0 && info.type == GS_SHADER_PARAM_STRING) {
 					dstr_copy(&cached_data->group, (const char *)annotation_default);
+				} else if (strcmp(info.name, "tooltip") == 0 && info.type == GS_SHADER_PARAM_STRING) {
+					dstr_copy(&cached_data->tooltip, (const char *)annotation_default);
 				} else if (strcmp(info.name, "minimum") == 0) {
 					if (info.type == GS_SHADER_PARAM_FLOAT || info.type == GS_SHADER_PARAM_VEC2 ||
 					    info.type == GS_SHADER_PARAM_VEC3 || info.type == GS_SHADER_PARAM_VEC4) {
@@ -2199,6 +2203,12 @@ static bool shader_filter_enum_audio_sources(void *data, obs_source_t *source)
 	return true;
 }
 
+static inline void shader_filter_set_tooltip(obs_property_t *p, const struct dstr *tooltip)
+{
+	if (p && tooltip && tooltip->len)
+		obs_property_set_long_description(p, tooltip->array);
+}
+
 static obs_properties_t *shader_filter_properties(void *data)
 {
 	struct shader_filter_data *filter = data;
@@ -2249,8 +2259,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 		obs_data_release(settings);
 	}
 
-	obs_properties_add_button(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),
-				  shader_filter_reload_effect_clicked);
+	obs_properties_add_button2(props, "reload_effect", obs_module_text("ShaderFilter.ReloadEffect"),
+				   shader_filter_reload_effect_clicked, data);
 
 	if (filter && (filter->param_audio_magnitude || filter->param_audio_peak)) {
 		obs_property_t *audio_source = obs_properties_add_list(props, "audio_source", "Audio source", OBS_COMBO_TYPE_LIST,
@@ -2300,9 +2310,10 @@ static obs_properties_t *shader_filter_properties(void *data)
 		}
 		if (!group)
 			group = props;
+		obs_property_t *p = NULL;
 		switch (param->type) {
 		case GS_SHADER_PARAM_BOOL:
-			obs_properties_add_bool(group, param_name, display_name.array);
+			p = obs_properties_add_bool(group, param_name, display_name.array);
 			break;
 		case GS_SHADER_PARAM_FLOAT: {
 			double range_min = param->minimum.f;
@@ -2315,9 +2326,10 @@ static obs_properties_t *shader_filter_properties(void *data)
 			}
 			obs_properties_remove_by_name(props, param_name);
 			if (widget_type != NULL && strcmp(widget_type, "slider") == 0) {
-				obs_properties_add_float_slider(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_float_slider(group, param_name, display_name.array, range_min, range_max,
+								    step);
 			} else {
-				obs_properties_add_float(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_float(group, param_name, display_name.array, range_min, range_max, step);
 			}
 			break;
 		}
@@ -2333,15 +2345,16 @@ static obs_properties_t *shader_filter_properties(void *data)
 			obs_properties_remove_by_name(props, param_name);
 
 			if (widget_type != NULL && strcmp(widget_type, "slider") == 0) {
-				obs_properties_add_int_slider(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_int_slider(group, param_name, display_name.array, range_min, range_max,
+								  step);
 			} else if (widget_type != NULL && strcmp(widget_type, "select") == 0) {
-				obs_property_t *plist = obs_properties_add_list(group, param_name, display_name.array,
-										OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+				p = obs_properties_add_list(group, param_name, display_name.array, OBS_COMBO_TYPE_LIST,
+							    OBS_COMBO_FORMAT_INT);
 				for (size_t i = 0; i < param->option_values.num; i++) {
-					obs_property_list_add_int(plist, option_labels[i].array, options[i]);
+					obs_property_list_add_int(p, option_labels[i].array, options[i]);
 				}
 			} else {
-				obs_properties_add_int(group, param_name, display_name.array, range_min, range_max, step);
+				p = obs_properties_add_int(group, param_name, display_name.array, range_min, range_max, step);
 			}
 			break;
 		}
@@ -2362,24 +2375,28 @@ static obs_properties_t *shader_filter_properties(void *data)
 
 			for (size_t i = 0; i < 2; i++) {
 				dstr_printf(&sources_name, "%s_%zu", param_name, i);
+				obs_property_t *sub = NULL;
 				if (i < param->option_labels.num) {
 					if (slider) {
-						obs_properties_add_float_slider(group, sources_name.array,
-										param->option_labels.array[i].array, range_min,
-										range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      param->option_labels.array[i].array,
+										      range_min, range_max, step);
 					} else {
-						obs_properties_add_float(group, sources_name.array,
-									 param->option_labels.array[i].array, range_min, range_max,
-									 step);
+						sub = obs_properties_add_float(group, sources_name.array,
+									       param->option_labels.array[i].array, range_min,
+									       range_max, step);
 					}
 				} else if (slider) {
 
-					obs_properties_add_float_slider(group, sources_name.array, display_name.array, range_min,
-									range_max, step);
+					sub = obs_properties_add_float_slider(group, sources_name.array, display_name.array,
+									      range_min, range_max, step);
 				} else {
-					obs_properties_add_float(group, sources_name.array, display_name.array, range_min,
-								 range_max, step);
+					sub = obs_properties_add_float(group, sources_name.array, display_name.array, range_min,
+								       range_max, step);
 				}
+				shader_filter_set_tooltip(sub, &param->tooltip);
+				if (i == 0)
+					p = sub;
 			}
 			dstr_free(&sources_name);
 
@@ -2397,18 +2414,23 @@ static obs_properties_t *shader_filter_properties(void *data)
 				}
 				for (size_t i = 0; i < 3; i++) {
 					dstr_printf(&sources_name, "%s_%zu", param_name, i);
+					obs_property_t *sub = NULL;
 					if (i < param->option_labels.num) {
-						obs_properties_add_float_slider(group, sources_name.array,
-										param->option_labels.array[i].array, range_min,
-										range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      param->option_labels.array[i].array,
+										      range_min, range_max, step);
 					} else {
-						obs_properties_add_float_slider(group, sources_name.array, display_name.array,
-										range_min, range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      display_name.array, range_min, range_max,
+										      step);
 					}
+					shader_filter_set_tooltip(sub, &param->tooltip);
+					if (i == 0)
+						p = sub;
 				}
 				dstr_free(&sources_name);
 			} else {
-				obs_properties_add_color(group, param_name, display_name.array);
+				p = obs_properties_add_color(group, param_name, display_name.array);
 			}
 			break;
 		case GS_SHADER_PARAM_VEC4:
@@ -2423,56 +2445,63 @@ static obs_properties_t *shader_filter_properties(void *data)
 				}
 				for (size_t i = 0; i < 4; i++) {
 					dstr_printf(&sources_name, "%s_%zu", param_name, i);
+					obs_property_t *sub = NULL;
 					if (i < param->option_labels.num) {
-						obs_properties_add_float_slider(group, sources_name.array,
-										param->option_labels.array[i].array, range_min,
-										range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      param->option_labels.array[i].array,
+										      range_min, range_max, step);
 					} else {
-						obs_properties_add_float_slider(group, sources_name.array, display_name.array,
-										range_min, range_max, step);
+						sub = obs_properties_add_float_slider(group, sources_name.array,
+										      display_name.array, range_min, range_max,
+										      step);
 					}
+					shader_filter_set_tooltip(sub, &param->tooltip);
+					if (i == 0)
+						p = sub;
 				}
 				dstr_free(&sources_name);
 			} else {
-				obs_properties_add_color_alpha(group, param_name, display_name.array);
+				p = obs_properties_add_color_alpha(group, param_name, display_name.array);
 			}
 			break;
 		case GS_SHADER_PARAM_TEXTURE:
 			if (widget_type != NULL && strcmp(widget_type, "source") == 0) {
 				dstr_init_copy_dstr(&sources_name, &param->name);
 				dstr_cat(&sources_name, "_source");
-				obs_property_t *p = obs_properties_add_list(group, sources_name.array, display_name.array,
-									    OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+				p = obs_properties_add_list(group, sources_name.array, display_name.array,
+							    OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
 				dstr_free(&sources_name);
 				obs_enum_sources(add_source_to_list, p);
 				obs_enum_scenes(add_source_to_list, p);
 				obs_property_list_insert_string(p, 0, "", "");
 
 			} else if (widget_type != NULL && strcmp(widget_type, "file") == 0) {
-				obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
-							shader_filter_texture_file_filter, NULL);
+				p = obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
+							    shader_filter_texture_file_filter, NULL);
 			} else {
 				dstr_init_copy_dstr(&sources_name, &param->name);
 				dstr_cat(&sources_name, "_source");
-				obs_property_t *p = obs_properties_add_list(group, sources_name.array, display_name.array,
-									    OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+				obs_property_t *src = obs_properties_add_list(group, sources_name.array, display_name.array,
+									      OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
 				dstr_free(&sources_name);
-				obs_property_list_add_string(p, "", "");
-				obs_enum_sources(add_source_to_list, p);
-				obs_enum_scenes(add_source_to_list, p);
-				obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
-							shader_filter_texture_file_filter, NULL);
+				obs_property_list_add_string(src, "", "");
+				obs_enum_sources(add_source_to_list, src);
+				obs_enum_scenes(add_source_to_list, src);
+				shader_filter_set_tooltip(src, &param->tooltip);
+				p = obs_properties_add_path(group, param_name, display_name.array, OBS_PATH_FILE,
+							    shader_filter_texture_file_filter, NULL);
 			}
 			break;
 		case GS_SHADER_PARAM_STRING:
 			if (widget_type != NULL && strcmp(widget_type, "info") == 0) {
-				obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_INFO);
+				p = obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_INFO);
 			} else {
-				obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_MULTILINE);
+				p = obs_properties_add_text(group, param_name, display_name.array, OBS_TEXT_MULTILINE);
 			}
 			break;
 		default:;
 		}
+		shader_filter_set_tooltip(p, &param->tooltip);
 		dstr_free(&display_name);
 	}
 	da_free(groups);
