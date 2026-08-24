@@ -2869,7 +2869,14 @@ static void shader_filter_tick(void *data, float seconds)
 gs_texrender_t *create_or_reset_texrender(gs_texrender_t *render)
 {
 	if (!render) {
-		render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		// Use a 16-bit float format rather than 8-bit RGBA so that shaders
+		// which feed a texrender's output back into itself as
+		// previous_image/previous_output (e.g. accumulating or decaying a
+		// value by a small fraction each frame) don't get stuck at an 8-bit
+		// UNORM rounding fixed point. This matches the format libobs
+		// already prefers for HDR/extended color spaces elsewhere in this
+		// file (see gs_get_format_from_space() below).
+		render = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
 	} else {
 		gs_texrender_reset(render);
 	}
