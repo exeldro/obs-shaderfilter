@@ -178,7 +178,7 @@ jobs:
           path: '*.tar.gz'
   windows-build:
     name: 'Windows Build'
-    runs-on: [windows-latest]
+    runs-on: [windows-2022]
     strategy:
       fail-fast: true
       matrix:
@@ -289,10 +289,6 @@ jobs:
         with:
           name: '${{ env.FILE_NAME }}'
           path: package/*
-      - name: "Package Installer (Prereqs)"
-        run: |
-          curl "-kL" "https://files.jrsoftware.org/is/6/innosetup-6.0.3.exe" "-f" "--retry" "5" "-o" "inno.exe"
-          .\inno.exe /VERYSILENT /SP- /SUPPRESSMSGBOXES /NORESTART
       - name: "Package Installer (Compile)"
         run: |
           & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' /Qp ".\installer.iss"

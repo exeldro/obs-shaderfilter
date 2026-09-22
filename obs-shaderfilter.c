@@ -1,30 +1,29 @@
 // Version 2.0 by Exeldro https://github.com/exeldro/obs-shaderfilter
 // Version 1.21 by Charles Fettinger https://github.com/Oncorporation/obs-shaderfilter
 // original version by nleseul https://github.com/nleseul/obs-shaderfilter
-#include <obs-module.h>
+#include "version.h"
+#include <float.h>
 #include <graphics/graphics.h>
 #include <graphics/image-file.h>
 #include <graphics/math-extra.h>
-
-#include <util/base.h>
-#include <util/dstr.h>
-#include <util/darray.h>
-#include <util/platform.h>
-#include <float.h>
 #include <limits.h>
-#include <stdio.h>
-#include <time.h>
-#include <string.h>
 #include <math.h>
-
+#include <obs-module.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <util/base.h>
+#include <util/darray.h>
+#include <util/dstr.h>
+#include <util/platform.h>
 #include <util/threading.h>
+
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #include <sys/time.h>
 #endif
-
-#include "version.h"
 
 float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
 
