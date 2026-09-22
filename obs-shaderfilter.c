@@ -2440,9 +2440,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 										      param->option_labels.array[i].array,
 										      range_min, range_max, step);
 					} else {
-						sub = obs_properties_add_float_slider(group, sources_name.array,
-										      display_name.array, range_min, range_max,
-										      step);
+						sub = obs_properties_add_float_slider(group, sources_name.array, display_name.array,
+										      range_min, range_max, step);
 					}
 					shader_filter_set_tooltip(sub, &param->tooltip);
 					if (i == 0)
@@ -2471,9 +2470,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 										      param->option_labels.array[i].array,
 										      range_min, range_max, step);
 					} else {
-						sub = obs_properties_add_float_slider(group, sources_name.array,
-										      display_name.array, range_min, range_max,
-										      step);
+						sub = obs_properties_add_float_slider(group, sources_name.array, display_name.array,
+										      range_min, range_max, step);
 					}
 					shader_filter_set_tooltip(sub, &param->tooltip);
 					if (i == 0)
@@ -2488,8 +2486,8 @@ static obs_properties_t *shader_filter_properties(void *data)
 			if (widget_type != NULL && strcmp(widget_type, "source") == 0) {
 				dstr_init_copy_dstr(&sources_name, &param->name);
 				dstr_cat(&sources_name, "_source");
-				p = obs_properties_add_list(group, sources_name.array, display_name.array,
-							    OBS_COMBO_TYPE_EDITABLE, OBS_COMBO_FORMAT_STRING);
+				p = obs_properties_add_list(group, sources_name.array, display_name.array, OBS_COMBO_TYPE_EDITABLE,
+							    OBS_COMBO_FORMAT_STRING);
 				dstr_free(&sources_name);
 				obs_enum_sources(add_source_to_list, p);
 				obs_enum_scenes(add_source_to_list, p);
@@ -2887,10 +2885,10 @@ static void shader_filter_tick(void *data, float seconds)
 	filter->input_rendered = false;
 }
 
-gs_texrender_t *create_or_reset_texrender(gs_texrender_t *render)
+gs_texrender_t *create_or_reset_texrender(gs_texrender_t *render, const enum gs_color_format format)
 {
 	if (!render) {
-		render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+		render = gs_texrender_create(format, GS_ZS_NONE);
 	} else {
 		gs_texrender_reset(render);
 	}
@@ -2924,7 +2922,7 @@ static void get_input_source(struct shader_filter_data *filter)
 	}
 
 	// Set up our input_texrender to catch the output texture.
-	filter->input_texrender = create_or_reset_texrender(filter->input_texrender);
+	filter->input_texrender = create_or_reset_texrender(filter->input_texrender, format);
 
 	// Start the rendering process with our correct color space params,
 	// And set up your texrender to recieve the created texture.
@@ -3177,6 +3175,20 @@ static inline void build_sprite_norm(struct gs_vb_data *data, float fcx, float f
 	build_sprite(data, fcx, fcy, 0.0f, 1.0f, 0.0f, 1.0f);
 }
 
+static enum gs_color_space shader_filter_get_color_space(void *data, size_t count, const enum gs_color_space *preferred_spaces)
+{
+	UNUSED_PARAMETER(count);
+	UNUSED_PARAMETER(preferred_spaces);
+	struct shader_filter_data *filter = data;
+	obs_source_t *target = obs_filter_get_target(filter->context);
+	const enum gs_color_space potential_spaces[] = {
+		GS_CS_SRGB,
+		GS_CS_SRGB_16F,
+		GS_CS_709_EXTENDED,
+	};
+	return obs_source_get_color_space(target, OBS_COUNTOF(potential_spaces), potential_spaces);
+}
+
 static void render_shader(struct shader_filter_data *filter, float f, obs_source_t *filter_to)
 {
 	gs_texture_t *texture = gs_texrender_get_texture(filter->input_texrender);
@@ -3189,7 +3201,10 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 		filter->output_texrender = filter->previous_output_texrender;
 		filter->previous_output_texrender = temp;
 	}
-	filter->output_texrender = create_or_reset_texrender(filter->output_texrender);
+
+	enum gs_color_space space = shader_filter_get_color_space(filter, 0, NULL);
+	enum gs_color_format format = gs_get_format_from_space(space);
+	filter->output_texrender = create_or_reset_texrender(filter->output_texrender, format);
 
 	if (filter->param_image)
 		gs_effect_set_texture(filter->param_image, texture);
@@ -3202,7 +3217,6 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 
 	if (f > 0.0f) {
 		if (filter_to) {
-
 			struct shader_filter_data *filter2 = obs_obj_get_data(filter_to);
 			for (size_t i = 0; i < filter->stored_param_list.num; i++) {
 				struct effect_param_data *param = (filter->stored_param_list.array + i);
@@ -3377,20 +3391,6 @@ static uint32_t shader_filter_getheight(void *data)
 static void shader_filter_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "shader_text", effect_template_default_image_shader);
-}
-
-static enum gs_color_space shader_filter_get_color_space(void *data, size_t count, const enum gs_color_space *preferred_spaces)
-{
-	UNUSED_PARAMETER(count);
-	UNUSED_PARAMETER(preferred_spaces);
-	struct shader_filter_data *filter = data;
-	obs_source_t *target = obs_filter_get_target(filter->context);
-	const enum gs_color_space potential_spaces[] = {
-		GS_CS_SRGB,
-		GS_CS_SRGB_16F,
-		GS_CS_709_EXTENDED,
-	};
-	return obs_source_get_color_space(target, OBS_COUNTOF(potential_spaces), potential_spaces);
 }
 
 void shader_filter_param_source_action(void *data, void (*action)(obs_source_t *source))
