@@ -28,6 +28,26 @@
 
 float (*move_get_transition_filter)(obs_source_t *filter_from, obs_source_t **filter_to) = NULL;
 
+void *(*gs_image_file_create_func)() = NULL;
+void (*gs_image_file_free_func)(void *image) = NULL;
+void (*gs_image_file_init_func)(void *image, const char *file, enum gs_image_alpha_mode alpha_mode) = NULL;
+void (*gs_image_file_init_texture_func)(void *image) = NULL;
+gs_texture_t *gs_image_file_get_texture(void *image)
+{
+	gs_texture_t **t = (gs_texture_t **)image;
+	return t[0];
+}
+
+void *gs_image_file4_create()
+{
+	return bzalloc(41336); //sizeof(struct gs_image_file4)
+}
+
+void *gs_image_file_ex_create()
+{
+	return bzalloc(72); //sizeof(gs_image_file_ex_t));
+}
+
 #define nullptr ((void *)0)
 
 static const char *effect_template_begin = "\
@@ -130,7 +150,7 @@ struct effect_param_data {
 	enum gs_shader_param_type type;
 	gs_eparam_t *param;
 
-	gs_image_file_t *image;
+	void *image;
 	gs_texrender_t *render;
 	obs_weak_source_t *source;
 
@@ -377,7 +397,7 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
 		if (param->image) {
 			obs_enter_graphics();
-			gs_image_file_free(param->image);
+			gs_image_file_free_func(param->image);
 			obs_leave_graphics();
 
 			bfree(param->image);
@@ -2722,7 +2742,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 				}
 				obs_source_release(source);
 				if (param->image) {
-					gs_image_file_free(param->image);
+					gs_image_file_free_func(param->image);
 					param->image = NULL;
 				}
 				dstr_free(&param->path);
@@ -2751,22 +2771,23 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 				}
 				path = obs_data_get_string(settings, param_name);
 				bool n = false;
-				if (param->image == NULL) {
-					param->image = bzalloc(sizeof(gs_image_file_t));
+				if (param->image == NULL && gs_image_file_create_func) {
+					param->image = gs_image_file_create_func();
 					n = true;
 				}
 				if (n || !path || !param->path.array || strcmp(path, param->path.array) != 0) {
-
-					if (!n) {
+					if (gs_image_file_free_func && gs_image_file_init_func && gs_image_file_init_texture_func) {
+						if (!n) {
+							obs_enter_graphics();
+							gs_image_file_free_func(param->image);
+							obs_leave_graphics();
+						}
+						gs_image_file_init_func(param->image, path, GS_IMAGE_ALPHA_PREMULTIPLY_SRGB);
+						dstr_copy(&param->path, path);
 						obs_enter_graphics();
-						gs_image_file_free(param->image);
+						gs_image_file_init_texture_func(param->image);
 						obs_leave_graphics();
 					}
-					gs_image_file_init(param->image, path);
-					dstr_copy(&param->path, path);
-					obs_enter_graphics();
-					gs_image_file_init_texture(param->image);
-					obs_leave_graphics();
 				}
 				obs_source_t *old_source = obs_weak_source_get_source(param->source);
 				if (old_source) {
@@ -3122,7 +3143,7 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 				gs_texture_t *tex = gs_texrender_get_texture(param->render);
 				gs_effect_set_texture(param->param, tex);
 			} else if (param->image) {
-				gs_effect_set_texture(param->param, param->image->texture);
+				gs_effect_set_texture(param->param, gs_image_file_get_texture(param->image));
 			} else {
 				gs_effect_set_texture(param->param, NULL);
 			}
@@ -3634,6 +3655,26 @@ bool obs_module_load(void)
 	blog(LOG_INFO, "[obs-shaderfilter] loaded version %s", PROJECT_VERSION);
 	obs_register_source(&shader_filter);
 	obs_register_source(&shader_transition);
+
+#ifdef _WIN32
+	void *dl = os_dlopen("obs");
+#else
+	void *dl = dlopen(nullptr, RTLD_LAZY);
+#endif
+	if (dl) {
+		if (true || obs_get_version() >= MAKE_SEMANTIC_VERSION(33, 0, 0)) {
+			gs_image_file_create_func = gs_image_file_ex_create;
+			gs_image_file_free_func = os_dlsym(dl, "gs_image_file_ex_free");
+			gs_image_file_init_func = os_dlsym(dl, "gs_image_file_ex_init");
+			gs_image_file_init_texture_func = os_dlsym(dl, "gs_image_file_ex_init_texture");
+		} else {
+			gs_image_file_create_func = gs_image_file4_create;
+			gs_image_file_free_func = os_dlsym(dl, "gs_image_file4_free");
+			gs_image_file_init_func = os_dlsym(dl, "gs_image_file4_init");
+			gs_image_file_init_texture_func = os_dlsym(dl, "gs_image_file4_init_texture");
+		}
+		os_dlclose(dl);
+	}
 
 	return true;
 }
