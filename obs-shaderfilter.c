@@ -41,7 +41,7 @@ void *(*gs_image_file_create_func)() = NULL;
 void (*gs_image_file_free_func)(struct image_file *image) = NULL;
 void (*gs_image_file_init_func)(struct image_file *image, const char *file, enum gs_image_alpha_mode alpha_mode) = NULL;
 void (*gs_image_file_init_texture_func)(struct image_file *image) = NULL;
-bool (*gs_image_file_tick_func)(struct image_file *image, uint64_t elapsed_time_ns);
+bool (*gs_image_file_tick_func)(struct image_file *image, uint64_t elapsed_time_ns) = NULL;
 void (*gs_image_file_update_texture_func)(struct image_file *image) = NULL;
 
 void *gs_image_file4_create()
@@ -2891,7 +2891,7 @@ static void shader_filter_tick(void *data, float seconds)
 	filter->output_rendered = false;
 	filter->input_rendered = false;
 
-	if (gs_image_file_tick_func) {
+	if (gs_image_file_tick_func && gs_image_file_update_texture_func) {
 		uint64_t frame_time = obs_get_video_frame_time();
 		if (filter->last_frame_time) {
 			bool g = false;
