@@ -1,0 +1,16 @@
+{
+    "display_name": "obs-shaderfilter",
+    "id": "7b65690a-1c83-47e8-a0d8-4da89c6cd5e3",
+    "version": "2.6.1",
+    "authors": ["Exeldro"],
+    "name": "obs-shaderfilter",
+    "description": "Add user defined shader effects to sources in OBS Studio.",
+    "long_description": "obs-shaderfilter allows you to add custom shader effects to sources in OBS Studio.",
+    "urls": {
+        "repository": "https://github.com/exeldro/obs-shaderfilter",
+        "website": "https://obsproject.com/forum/resources/obs-shaderfilter.1736/",
+        "support": "https://obsproject.com/forum/threads/obs-shaderfilter.167535/"
+    },
+    "has_banner": false,
+    "has_icon": false
+}
