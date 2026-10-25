@@ -143,6 +143,35 @@ technique Draw\n\
 	}\n\
 }\n";
 
+// Only added when the shader defines stateImage, so existing shaders are unaffected.
+static const char *effect_template_state_params = "\
+uniform texture2d previous_state;\n\
+uniform texture2d state_texture;\n\
+uniform float2 state_size;\n\
+\n";
+
+static const char *effect_template_state_technique = "\n\
+technique DrawState\n\
+{\n\
+	pass\n\
+	{\n\
+		vertex_shader = mainTransform(v_in);\n\
+		pixel_shader = stateImage(v_in);\n\
+	}\n\
+}\n";
+
+#define STATE_FUNCTION_NAME "stateImage"
+#define STATE_TECHNIQUE_NAME "DrawState"
+#define STATE_SCALE_DEFINE "#define STATE_SCALE"
+#define STATE_FORMAT_DEFINE "#define STATE_FORMAT"
+#define STATE_SCALE_MIN 0.01
+#define STATE_SCALE_MAX 4.0
+#define STATE_MAX_SIZE 16384u
+// Per texture; keeps large sources with a high STATE_SCALE within GPU resource limits.
+#define STATE_MAX_BYTES (256.0 * 1024.0 * 1024.0)
+// Keeps float(frame_count) exact in shaders (24-bit float mantissa).
+#define FRAME_COUNT_WRAP 16777216
+
 struct effect_param_data {
 	struct dstr name;
 	struct dstr display_name;
@@ -255,6 +284,22 @@ struct shader_filter_data {
 	gs_eparam_t *param_previous_output;
 	gs_eparam_t *param_audio_peak;
 	gs_eparam_t *param_audio_magnitude;
+	gs_eparam_t *param_delta_time;
+	gs_eparam_t *param_frame_count;
+	gs_eparam_t *param_previous_state;
+	gs_eparam_t *param_state_texture;
+	gs_eparam_t *param_state_size;
+
+	// Ping-pong pair for the optional stateImage pass; state_index points at the latest state.
+	bool state_enabled;
+	bool state_rendered;
+	bool state_failed;
+	float state_scale;
+	enum gs_color_format state_format;
+	gs_texrender_t *state_texrender[2];
+	size_t state_index;
+	uint32_t state_cx;
+	uint32_t state_cy;
 
 	int expand_left;
 	int expand_right;
@@ -279,6 +324,8 @@ struct shader_filter_data {
 	float rand_activation_f;
 	float audio_peak;
 	float audio_magnitude;
+	float delta_time;
+	int frame_count;
 
 	char *audio_source_name;
 	obs_volmeter_t *volmeter;
@@ -363,6 +410,34 @@ static char *load_shader_from_file(const char *file_name) // add input of visite
 	return shader_file.array;
 }
 
+// The image functions are resolved at runtime and may be missing on some OBS versions.
+static void free_param_image(struct effect_param_data *param)
+{
+	if (!param->image)
+		return;
+	if (gs_image_file_free_func) {
+		obs_enter_graphics();
+		gs_image_file_free_func(param->image);
+		obs_leave_graphics();
+	}
+	bfree(param->image);
+	param->image = NULL;
+}
+
+// Must be called inside the graphics context.
+static void shader_filter_free_state(struct shader_filter_data *filter)
+{
+	for (size_t i = 0; i < 2; i++) {
+		gs_texrender_destroy(filter->state_texrender[i]);
+		filter->state_texrender[i] = NULL;
+	}
+	filter->state_index = 0;
+	filter->state_cx = 0;
+	filter->state_cy = 0;
+	filter->state_rendered = false;
+	filter->state_failed = false;
+}
+
 static void shader_filter_clear_params(struct shader_filter_data *filter)
 {
 	filter->param_current_time_ms = NULL;
@@ -398,18 +473,16 @@ static void shader_filter_clear_params(struct shader_filter_data *filter)
 	filter->param_transition_time = NULL;
 	filter->param_convert_linear = NULL;
 	filter->param_previous_output = NULL;
+	filter->param_delta_time = NULL;
+	filter->param_frame_count = NULL;
+	filter->param_previous_state = NULL;
+	filter->param_state_texture = NULL;
+	filter->param_state_size = NULL;
 
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
 		struct effect_param_data *param = (filter->stored_param_list.array + param_index);
-		if (param->image) {
-			obs_enter_graphics();
-			gs_image_file_free_func(param->image);
-			obs_leave_graphics();
-
-			bfree(param->image);
-			param->image = NULL;
-		}
+		free_param_image(param);
 		if (param->source) {
 			obs_source_t *source = obs_weak_source_get_source(param->source);
 			if (source) {
@@ -506,6 +579,112 @@ static void load_sprite_buffer(struct shader_filter_data *filter)
 	filter->sprite_buffer = gs_vertexbuffer_create(vbd, GS_DYNAMIC);
 }
 
+static bool is_var_char(char ch)
+{
+	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+}
+
+static const char *get_line_start(const char *text, const char *pos)
+{
+	while (pos > text && *(pos - 1) != '\n')
+		pos--;
+	return pos;
+}
+
+static bool is_in_line_comment(const char *text, const char *pos)
+{
+	for (const char *ch = get_line_start(text, pos); ch + 1 < pos; ch++) {
+		if (ch[0] == '/' && ch[1] == '/')
+			return true;
+	}
+	return false;
+}
+
+static bool is_first_on_line(const char *text, const char *pos)
+{
+	for (const char *ch = get_line_start(text, pos); ch < pos; ch++) {
+		if (*ch != ' ' && *ch != '\t' && *ch != '\r')
+			return false;
+	}
+	return true;
+}
+
+static bool has_state_function(const char *text)
+{
+	const size_t len = strlen(STATE_FUNCTION_NAME);
+	const char *pos = strstr(text, STATE_FUNCTION_NAME);
+	while (pos) {
+		const char *next = pos + len;
+		const bool word_start = pos == text || !is_var_char(*(pos - 1));
+		while (*next == ' ' || *next == '\t')
+			next++;
+		if (word_start && *next == '(' && !is_in_line_comment(text, pos))
+			return true;
+		pos = strstr(pos + len, STATE_FUNCTION_NAME);
+	}
+	return false;
+}
+
+// Returns the text after "#define NAME " or NULL when the define is absent.
+static const char *find_define_value(const char *text, const char *define)
+{
+	const size_t len = strlen(define);
+	const char *pos = strstr(text, define);
+	while (pos) {
+		const char *value = pos + len;
+		if ((*value == ' ' || *value == '\t') && is_first_on_line(text, pos)) {
+			while (*value == ' ' || *value == '\t')
+				value++;
+			return value;
+		}
+		pos = strstr(value, define);
+	}
+	return NULL;
+}
+
+static float parse_state_scale(const char *text)
+{
+	const char *value = find_define_value(text, STATE_SCALE_DEFINE);
+	if (!value)
+		return 1.0f;
+
+	// os_strtod is locale independent, unlike strtod.
+	double scale = os_strtod(value);
+	if (!(scale > 0.0)) {
+		blog(LOG_WARNING, "[obs-shaderfilter] invalid STATE_SCALE, using 1.0");
+		return 1.0f;
+	}
+	if (scale < STATE_SCALE_MIN)
+		scale = STATE_SCALE_MIN;
+	if (scale > STATE_SCALE_MAX)
+		scale = STATE_SCALE_MAX;
+	return (float)scale;
+}
+
+static enum gs_color_format parse_state_format(const char *text)
+{
+	static const struct {
+		const char *name;
+		enum gs_color_format format;
+	} formats[] = {
+		{"RGBA8", GS_RGBA},
+		{"RGBA16F", GS_RGBA16F},
+		{"RGBA32F", GS_RGBA32F},
+	};
+
+	const char *value = find_define_value(text, STATE_FORMAT_DEFINE);
+	if (!value)
+		return GS_RGBA;
+
+	for (size_t i = 0; i < OBS_COUNTOF(formats); i++) {
+		const size_t len = strlen(formats[i].name);
+		if (strncmp(value, formats[i].name, len) == 0 && !is_var_char(value[len]))
+			return formats[i].format;
+	}
+	blog(LOG_WARNING, "[obs-shaderfilter] unknown STATE_FORMAT, using RGBA8");
+	return GS_RGBA;
+}
+
 static void shader_filter_reload_effect(struct shader_filter_data *filter)
 {
 	obs_data_t *settings = obs_source_get_settings(filter->context);
@@ -514,12 +693,15 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	filter->shader_start_time = 0.0f;
 	shader_filter_clear_params(filter);
 
+	obs_enter_graphics();
 	if (filter->effect != NULL) {
-		obs_enter_graphics();
 		gs_effect_destroy(filter->effect);
 		filter->effect = NULL;
-		obs_leave_graphics();
 	}
+	// The state is tied to the shader that produced it, so a reload starts from a cleared state.
+	shader_filter_free_state(filter);
+	filter->state_enabled = false;
+	obs_leave_graphics();
 
 	// Load text and build the effect from the template, if necessary.
 	char *shader_text = NULL;
@@ -543,9 +725,12 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 	filter->use_template = use_template;
 
 	struct dstr effect_text = {0};
+	const bool template_state = use_template && shader_text && has_state_function(shader_text);
 
 	if (use_template) {
 		dstr_cat(&effect_text, effect_template_begin);
+		if (template_state)
+			dstr_cat(&effect_text, effect_template_state_params);
 	}
 
 	if (shader_text) {
@@ -555,6 +740,8 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 
 	if (use_template) {
 		dstr_cat(&effect_text, effect_template_end);
+		if (template_state)
+			dstr_cat(&effect_text, effect_template_state_technique);
 	}
 
 	// Create the effect.
@@ -573,9 +760,16 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 		filter->use_pm_alpha = false;
 	}
 
+	if (effect_text.len) {
+		filter->state_scale = parse_state_scale(effect_text.array);
+		filter->state_format = parse_state_format(effect_text.array);
+	}
+
 	if (filter->effect)
 		gs_effect_destroy(filter->effect);
 	filter->effect = gs_effect_create(effect_text.array, NULL, &errors);
+	// Effect files may declare the state technique themselves, so detect it on the compiled effect.
+	filter->state_enabled = filter->effect && gs_effect_get_technique(filter->effect, STATE_TECHNIQUE_NAME);
 	obs_leave_graphics();
 
 	if (filter->effect == NULL) {
@@ -665,6 +859,16 @@ static void shader_filter_reload_effect(struct shader_filter_data *filter)
 			filter->param_previous_image = param;
 		} else if (strcmp(info.name, "previous_output") == 0) {
 			filter->param_previous_output = param;
+		} else if (strcmp(info.name, "delta_time") == 0) {
+			filter->param_delta_time = param;
+		} else if (strcmp(info.name, "frame_count") == 0) {
+			filter->param_frame_count = param;
+		} else if (filter->state_enabled && strcmp(info.name, "previous_state") == 0) {
+			filter->param_previous_state = param;
+		} else if (filter->state_enabled && strcmp(info.name, "state_texture") == 0) {
+			filter->param_state_texture = param;
+		} else if (filter->state_enabled && strcmp(info.name, "state_size") == 0) {
+			filter->param_state_size = param;
 		} else if (filter->transition && strcmp(info.name, "image_a") == 0) {
 			filter->param_image_a = param;
 		} else if (filter->transition && strcmp(info.name, "image_b") == 0) {
@@ -782,6 +986,7 @@ static void shader_filter_destroy(void *data)
 		gs_texrender_destroy(filter->previous_input_texrender);
 	if (filter->previous_output_texrender)
 		gs_texrender_destroy(filter->previous_output_texrender);
+	shader_filter_free_state(filter);
 	if (filter->sprite_buffer)
 		gs_vertexbuffer_destroy(filter->sprite_buffer);
 	obs_leave_graphics();
@@ -877,11 +1082,6 @@ static bool add_source_to_list(void *data, obs_source_t *source)
 		idx++;
 	obs_property_list_insert_string(p, idx, name, name);
 	return true;
-}
-
-static bool is_var_char(char ch)
-{
-	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
 }
 
 static void convert_if_defined(struct dstr *effect_text)
@@ -2746,10 +2946,7 @@ static void shader_filter_update(void *data, obs_data_t *settings)
 					param->source = obs_source_get_weak_source(source);
 				}
 				obs_source_release(source);
-				if (param->image) {
-					gs_image_file_free_func(param->image);
-					param->image = NULL;
-				}
+				free_param_image(param);
 				dstr_free(&param->path);
 			} else {
 				const char *path = default_value;
@@ -2860,6 +3057,8 @@ static void shader_filter_tick(void *data, float seconds)
 			filter->loops = -filter->loops;
 	}
 	filter->local_time = (float)(os_gettime_ns() / 1000000000.0);
+	filter->delta_time = seconds;
+	filter->frame_count = (filter->frame_count + 1) % FRAME_COUNT_WRAP;
 	if (filter->enabled != obs_source_enabled(filter->context)) {
 		filter->enabled = !filter->enabled;
 		if (filter->enabled)
@@ -2890,6 +3089,7 @@ static void shader_filter_tick(void *data, float seconds)
 
 	filter->output_rendered = false;
 	filter->input_rendered = false;
+	filter->state_rendered = false;
 
 	if (gs_image_file_tick_func && gs_image_file_update_texture_func) {
 		uint64_t frame_time = obs_get_video_frame_time();
@@ -3016,7 +3216,50 @@ static void draw_output(struct shader_filter_data *filter)
 	obs_source_process_filter_end(filter->context, pass_through, filter->total_width, filter->total_height);
 }
 
-void shader_filter_set_effect_params(struct shader_filter_data *filter)
+static void render_param_source(struct effect_param_data *param, obs_source_t *source)
+{
+	const enum gs_color_space preferred_spaces[] = {
+		GS_CS_SRGB,
+		GS_CS_SRGB_16F,
+		GS_CS_709_EXTENDED,
+	};
+	const enum gs_color_space space =
+		obs_source_get_color_space(source, OBS_COUNTOF(preferred_spaces), preferred_spaces);
+	const enum gs_color_format format = gs_get_format_from_space(space);
+	if (!param->render || gs_texrender_get_format(param->render) != format) {
+		gs_texrender_destroy(param->render);
+		param->render = gs_texrender_create(format, GS_ZS_NONE);
+	} else {
+		gs_texrender_reset(param->render);
+	}
+	uint32_t base_width = obs_source_get_base_width(source);
+	uint32_t base_height = obs_source_get_base_height(source);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+	if (gs_texrender_begin_with_color_space(param->render, base_width, base_height, space)) {
+		const float w = (float)base_width;
+		const float h = (float)base_height;
+		uint32_t flags = obs_source_get_output_flags(source);
+		const bool custom_draw = (flags & OBS_SOURCE_CUSTOM_DRAW) != 0;
+		const bool async = (flags & OBS_SOURCE_ASYNC) != 0;
+		struct vec4 clear_color;
+
+		vec4_zero(&clear_color);
+		gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
+		gs_ortho(0.0f, w, 0.0f, h, -100.0f, 100.0f);
+
+		if (!custom_draw && !async)
+			obs_source_default_render(source);
+		else
+			obs_source_video_render(source);
+		gs_texrender_end(param->render);
+	}
+	gs_blend_state_pop();
+}
+
+// Sources of texture parameters are rendered once per frame; render_sources is false when the values
+// only need to be set again.
+void shader_filter_set_effect_params(struct shader_filter_data *filter, bool render_sources)
 {
 
 	if (filter->param_uv_scale != NULL) {
@@ -3104,6 +3347,12 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 	if (filter->param_rand_instance_f != NULL) {
 		gs_effect_set_float(filter->param_rand_instance_f, filter->rand_instance_f);
 	}
+	if (filter->param_delta_time != NULL) {
+		gs_effect_set_float(filter->param_delta_time, filter->delta_time);
+	}
+	if (filter->param_frame_count != NULL) {
+		gs_effect_set_int(filter->param_frame_count, filter->frame_count);
+	}
 
 	size_t param_count = filter->stored_param_list.num;
 	for (size_t param_index = 0; param_index < param_count; param_index++) {
@@ -3134,46 +3383,10 @@ void shader_filter_set_effect_params(struct shader_filter_data *filter)
 		case GS_SHADER_PARAM_TEXTURE:
 			source = obs_weak_source_get_source(param->source);
 			if (source) {
-				const enum gs_color_space preferred_spaces[] = {
-					GS_CS_SRGB,
-					GS_CS_SRGB_16F,
-					GS_CS_709_EXTENDED,
-				};
-				const enum gs_color_space space =
-					obs_source_get_color_space(source, OBS_COUNTOF(preferred_spaces), preferred_spaces);
-				const enum gs_color_format format = gs_get_format_from_space(space);
-				if (!param->render || gs_texrender_get_format(param->render) != format) {
-					gs_texrender_destroy(param->render);
-					param->render = gs_texrender_create(format, GS_ZS_NONE);
-				} else {
-					gs_texrender_reset(param->render);
-				}
-				uint32_t base_width = obs_source_get_base_width(source);
-				uint32_t base_height = obs_source_get_base_height(source);
-				gs_blend_state_push();
-				gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
-				if (gs_texrender_begin_with_color_space(param->render, base_width, base_height, space)) {
-					const float w = (float)base_width;
-					const float h = (float)base_height;
-					uint32_t flags = obs_source_get_output_flags(source);
-					const bool custom_draw = (flags & OBS_SOURCE_CUSTOM_DRAW) != 0;
-					const bool async = (flags & OBS_SOURCE_ASYNC) != 0;
-					struct vec4 clear_color;
-
-					vec4_zero(&clear_color);
-					gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
-					gs_ortho(0.0f, w, 0.0f, h, -100.0f, 100.0f);
-
-					if (!custom_draw && !async)
-						obs_source_default_render(source);
-					else
-						obs_source_video_render(source);
-					gs_texrender_end(param->render);
-				}
-				gs_blend_state_pop();
+				if (render_sources)
+					render_param_source(param, source);
 				obs_source_release(source);
-				gs_texture_t *tex = gs_texrender_get_texture(param->render);
-				gs_effect_set_texture(param->param, tex);
+				gs_effect_set_texture(param->param, gs_texrender_get_texture(param->render));
 			} else if (param->image) {
 				gs_effect_set_texture(param->param, param->image->texture);
 			} else {
@@ -3223,23 +3436,159 @@ static enum gs_color_space shader_filter_get_color_space(void *data, size_t coun
 	return obs_source_get_color_space(target, OBS_COUNTOF(potential_spaces), potential_spaces);
 }
 
-static void render_shader(struct shader_filter_data *filter, float f, obs_source_t *filter_to)
+static void draw_technique(struct shader_filter_data *filter, const char *technique, gs_texture_t *texture, uint32_t width,
+			   uint32_t height)
 {
-	gs_texture_t *texture = gs_texrender_get_texture(filter->input_texrender);
-	if (!texture) {
-		return;
+	while (gs_effect_loop(filter->effect, technique)) {
+		if (filter->use_template) {
+			gs_draw_sprite(texture, 0, width, height);
+		} else {
+			if (!filter->sprite_buffer)
+				load_sprite_buffer(filter);
+
+			struct gs_vb_data *data = gs_vertexbuffer_get_data(filter->sprite_buffer);
+			build_sprite_norm(data, (float)width, (float)height);
+			gs_vertexbuffer_flush(filter->sprite_buffer);
+			gs_load_vertexbuffer(filter->sprite_buffer);
+			gs_load_indexbuffer(NULL);
+			gs_draw(GS_TRISTRIP, 0, 0);
+		}
+	}
+}
+
+static uint32_t get_state_bytes_per_pixel(enum gs_color_format format)
+{
+	switch (format) {
+	case GS_RGBA32F:
+		return 16;
+	case GS_RGBA16F:
+		return 8;
+	default:
+		return 4;
+	}
+}
+
+static uint32_t get_state_dimension(uint32_t size, double scale)
+{
+	const double scaled = ceil((double)size * scale);
+	if (scaled < 1.0)
+		return 1;
+	if (scaled > STATE_MAX_SIZE)
+		return STATE_MAX_SIZE;
+	return (uint32_t)scaled;
+}
+
+static void get_state_size(const struct shader_filter_data *filter, uint32_t width, uint32_t height, uint32_t *cx, uint32_t *cy)
+{
+	double scale = filter->state_scale;
+	const double bytes = (double)width * height * scale * scale * get_state_bytes_per_pixel(filter->state_format);
+	if (bytes > STATE_MAX_BYTES)
+		scale *= sqrt(STATE_MAX_BYTES / bytes);
+	*cx = get_state_dimension(width, scale);
+	*cy = get_state_dimension(height, scale);
+}
+
+// Creates the state textures on first use and clears the latest state to zero when the size changes.
+static bool prepare_state(struct shader_filter_data *filter, uint32_t cx, uint32_t cy)
+{
+	bool reset = filter->state_cx != cx || filter->state_cy != cy;
+	// Retrying a failed allocation every frame would only flood the log.
+	if (filter->state_failed && !reset)
+		return false;
+	filter->state_failed = false;
+
+	for (size_t i = 0; i < 2; i++) {
+		if (filter->state_texrender[i])
+			continue;
+		filter->state_texrender[i] = gs_texrender_create(filter->state_format, GS_ZS_NONE);
+		if (!filter->state_texrender[i]) {
+			filter->state_failed = true;
+			return false;
+		}
+		reset = true;
+	}
+	if (!reset)
+		return true;
+
+	filter->state_cx = cx;
+	filter->state_cy = cy;
+	gs_texrender_t *latest = filter->state_texrender[filter->state_index];
+	gs_texrender_reset(latest);
+	if (!gs_texrender_begin(latest, cx, cy)) {
+		blog(LOG_WARNING, "[obs-shaderfilter] unable to create a %ux%u state texture", cx, cy);
+		filter->state_failed = true;
+		return false;
+	}
+	struct vec4 clear_color;
+	vec4_zero(&clear_color);
+	gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
+	gs_texrender_end(latest);
+	return true;
+}
+
+static void bind_state_params(struct shader_filter_data *filter, gs_texture_t *previous, gs_texture_t *current)
+{
+	if (filter->param_previous_state)
+		gs_effect_set_texture(filter->param_previous_state, previous);
+	if (filter->param_state_texture)
+		gs_effect_set_texture(filter->param_state_texture, current);
+	if (filter->param_state_size) {
+		struct vec2 size;
+		vec2_set(&size, (float)filter->state_cx, (float)filter->state_cy);
+		gs_effect_set_vec2(filter->param_state_size, &size);
+	}
+}
+
+// Runs stateImage at most once per video tick, then exposes the result to mainImage as state_texture.
+// Returns true when the state technique ran, which clears the effect parameters.
+static bool render_state(struct shader_filter_data *filter, gs_texture_t *texture, uint32_t width, uint32_t height)
+{
+	if (!filter->state_enabled)
+		return false;
+
+	bool technique_ran = false;
+	if (!filter->state_rendered) {
+		uint32_t cx, cy;
+		get_state_size(filter, width, height, &cx, &cy);
+		if (!prepare_state(filter, cx, cy))
+			return false;
+
+		gs_texture_t *previous = gs_texrender_get_texture(filter->state_texrender[filter->state_index]);
+		gs_texrender_t *target = filter->state_texrender[filter->state_index ^ 1];
+
+		// Never bind the render target as an input, so state_texture also points at the previous state here.
+		bind_state_params(filter, previous, previous);
+
+		// State holds raw data, not colors: no blending and no sRGB encoding on write.
+		const bool previous_srgb = gs_framebuffer_srgb_enabled();
+		gs_enable_framebuffer_srgb(false);
+		gs_blend_state_push();
+		gs_reset_blend_state();
+		gs_enable_blending(false);
+		gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
+		gs_texrender_reset(target);
+		if (gs_texrender_begin(target, cx, cy)) {
+			gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+			draw_technique(filter, STATE_TECHNIQUE_NAME, texture, cx, cy);
+			technique_ran = true;
+			gs_texrender_end(target);
+			filter->state_index ^= 1;
+			filter->state_rendered = true;
+		}
+
+		gs_blend_state_pop();
+		gs_enable_framebuffer_srgb(previous_srgb);
 	}
 
-	if (filter->param_previous_output) {
-		gs_texrender_t *temp = filter->output_texrender;
-		filter->output_texrender = filter->previous_output_texrender;
-		filter->previous_output_texrender = temp;
-	}
+	bind_state_params(filter, gs_texrender_get_texture(filter->state_texrender[filter->state_index ^ 1]),
+			  gs_texrender_get_texture(filter->state_texrender[filter->state_index]));
+	return technique_ran;
+}
 
-	enum gs_color_space space = shader_filter_get_color_space(filter, 0, NULL);
-	enum gs_color_format format = gs_get_format_from_space(space);
-	filter->output_texrender = create_or_reset_texrender(filter->output_texrender, format);
-
+static void set_render_params(struct shader_filter_data *filter, gs_texture_t *texture, float f, obs_source_t *filter_to,
+			      bool render_sources)
+{
 	if (filter->param_image)
 		gs_effect_set_texture(filter->param_image, texture);
 	if (filter->param_previous_image)
@@ -3247,7 +3596,7 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 	if (filter->param_previous_output)
 		gs_effect_set_texture(filter->param_previous_output, gs_texrender_get_texture(filter->previous_output_texrender));
 
-	shader_filter_set_effect_params(filter);
+	shader_filter_set_effect_params(filter, render_sources);
 
 	if (f > 0.0f) {
 		if (filter_to) {
@@ -3348,6 +3697,29 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 			}
 		}
 	}
+}
+
+static void render_shader(struct shader_filter_data *filter, float f, obs_source_t *filter_to)
+{
+	gs_texture_t *texture = gs_texrender_get_texture(filter->input_texrender);
+	if (!texture) {
+		return;
+	}
+
+	if (filter->param_previous_output) {
+		gs_texrender_t *temp = filter->output_texrender;
+		filter->output_texrender = filter->previous_output_texrender;
+		filter->previous_output_texrender = temp;
+	}
+
+	enum gs_color_space space = shader_filter_get_color_space(filter, 0, NULL);
+	enum gs_color_format format = gs_get_format_from_space(space);
+	filter->output_texrender = create_or_reset_texrender(filter->output_texrender, format);
+
+	set_render_params(filter, texture, f, filter_to, true);
+	// Ending a technique clears every effect parameter, so the main pass needs them set again.
+	if (render_state(filter, texture, filter->total_width, filter->total_height))
+		set_render_params(filter, texture, f, filter_to, false);
 
 	gs_blend_state_push();
 	gs_reset_blend_state();
@@ -3356,21 +3728,7 @@ static void render_shader(struct shader_filter_data *filter, float f, obs_source
 
 	if (gs_texrender_begin(filter->output_texrender, filter->total_width, filter->total_height)) {
 		gs_ortho(0.0f, (float)filter->total_width, 0.0f, (float)filter->total_height, -100.0f, 100.0f);
-		while (gs_effect_loop(filter->effect, "Draw")) {
-			if (filter->use_template) {
-				gs_draw_sprite(texture, 0, filter->total_width, filter->total_height);
-			} else {
-				if (!filter->sprite_buffer)
-					load_sprite_buffer(filter);
-
-				struct gs_vb_data *data = gs_vertexbuffer_get_data(filter->sprite_buffer);
-				build_sprite_norm(data, (float)filter->total_width, (float)filter->total_height);
-				gs_vertexbuffer_flush(filter->sprite_buffer);
-				gs_load_vertexbuffer(filter->sprite_buffer);
-				gs_load_indexbuffer(NULL);
-				gs_draw(GS_TRISTRIP, 0, 0);
-			}
-		}
+		draw_technique(filter, "Draw", texture, filter->total_width, filter->total_height);
 		gs_texrender_end(filter->output_texrender);
 	}
 
@@ -3575,26 +3933,8 @@ static bool shader_transition_audio_render(void *data, uint64_t *ts_out, struct 
 	return obs_transition_audio_render(filter->context, ts_out, audio, mixers, channels, sample_rate, mix_a, mix_b);
 }
 
-static void shader_transition_video_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t, uint32_t cx, uint32_t cy)
+static void set_transition_params(struct shader_filter_data *filter, gs_texture_t *a, gs_texture_t *b, float t, bool render_sources)
 {
-	if (!a && !b)
-		return;
-
-	struct shader_filter_data *filter = data;
-	if (filter->effect == NULL || filter->rendering)
-		return;
-
-	if (!filter->prev_transitioning) {
-		if (obs_source_active(filter->context))
-			shader_filter_param_source_action(data, obs_source_inc_active);
-		if (obs_source_showing(filter->context))
-			shader_filter_param_source_action(data, obs_source_inc_showing);
-	}
-	filter->transitioning = true;
-
-	const bool previous = gs_framebuffer_srgb_enabled();
-	gs_enable_framebuffer_srgb(true);
-
 	if (gs_get_color_space() == GS_CS_SRGB) {
 		if (filter->param_image_a != NULL)
 			gs_effect_set_texture(filter->param_image_a, a);
@@ -3617,7 +3957,33 @@ static void shader_transition_video_callback(void *data, gs_texture_t *a, gs_tex
 	if (filter->param_transition_time != NULL)
 		gs_effect_set_float(filter->param_transition_time, t);
 
-	shader_filter_set_effect_params(filter);
+	shader_filter_set_effect_params(filter, render_sources);
+}
+
+static void shader_transition_video_callback(void *data, gs_texture_t *a, gs_texture_t *b, float t, uint32_t cx, uint32_t cy)
+{
+	if (!a && !b)
+		return;
+
+	struct shader_filter_data *filter = data;
+	if (filter->effect == NULL || filter->rendering)
+		return;
+
+	if (!filter->prev_transitioning) {
+		if (obs_source_active(filter->context))
+			shader_filter_param_source_action(data, obs_source_inc_active);
+		if (obs_source_showing(filter->context))
+			shader_filter_param_source_action(data, obs_source_inc_showing);
+	}
+	filter->transitioning = true;
+
+	const bool previous = gs_framebuffer_srgb_enabled();
+	gs_enable_framebuffer_srgb(true);
+
+	set_transition_params(filter, a, b, t, true);
+	// Ending a technique clears every effect parameter, so the main pass needs them set again.
+	if (render_state(filter, NULL, cx, cy))
+		set_transition_params(filter, a, b, t, false);
 
 	while (gs_effect_loop(filter->effect, "Draw"))
 		gs_draw_sprite(NULL, 0, cx, cy);

@@ -146,6 +146,45 @@ handle these variables being missing, but the shader may malfunction.)
   More reactive to sudden sounds like drums.
 * **`audio_magnitude`** (`float`)&mdash;The RMS (Root Mean Square) audio level from the selected audio source, normalized to 0.0-1.0.
   Smoother representation of sustained audio levels.
+* **`delta_time`** (`float`)&mdash;The time in seconds since the previous frame. Multiply per-frame rates by it to make
+  animations and simulations independent of the frame rate.
+* **`frame_count`** (`int`)&mdash;The number of frames since the filter was created. Wraps to 0 at 16777216, so
+  `float(frame_count)` stays exact. Useful as a per-frame random seed.
+* **`previous_state`**, **`state_texture`**, **`state_size`**&mdash;See [State pass](#state-pass).
+
+### State pass
+
+Define a `stateImage` function next to `mainImage` to keep data between frames, for example a simulation or
+motion trails. Each frame the plugin renders `stateImage` into a state texture, then renders `mainImage`:
+
+```hlsl
+float4 stateImage(VertData v_in) : TARGET
+{
+  float4 last = previous_state.SampleLevel(textureSampler, v_in.uv, 0.0);
+  return lerp(last, image.Sample(textureSampler, v_in.uv), 0.1);
+}
+
+float4 mainImage(VertData v_in) : TARGET
+{
+  return state_texture.Sample(textureSampler, v_in.uv);
+}
+```
+
+* **`previous_state`** (`texture2d`)&mdash;Last frame's state. Read it in `stateImage`.
+* **`state_texture`** (`texture2d`)&mdash;This frame's state. Read it in `mainImage`.
+* **`state_size`** (`float2`)&mdash;The size of the state texture in pixels.
+
+The plugin declares these uniforms whenever `stateImage` exists. Declaring them again is a compile error.
+With *Override entire effect*, declare them yourself and add a technique named `DrawState`.
+
+* Loading the shader or changing the state size clears the state to `float4(0, 0, 0, 0)`. Write a non-zero alpha
+  to tell an initialized pixel from a cleared one.
+* `stateImage` runs only while the filter renders. A hidden source keeps its state unchanged.
+* The state texture covers the whole filter output. With `expand_*` borders, sample it at
+  `(v_in.uv - uv_offset) / uv_scale`.
+* Writes to the state skip blending and sRGB conversion.
+* Some GPUs can't filter floating point textures linearly. For exact reads use a `Filter = Point` sampler and texel
+  centers: `(floor(uv * state_size) + 0.5) / state_size`.
 
 ### Optional Preprocessing Macros
 
@@ -154,6 +193,12 @@ The plugin provides some optional pre-processing macros.
 * **`#include "<path-to-file>"`** The include macro will insert the contents file at the path `<path-to-file>` before the shader is compiled. This is useful to place commonly used functions, in a separate file that can be used by multiple shaders.  E.g.: `#include "util-fns.effect"`.
 * **`#define <NAME> <value>`** This allows you to define constants to be used throughout your shader. Constants can be values or even simple functions. Anywhere the value in `<NAME>` is found in your shader, it will be replaced with whatever is in `<value>`.  For example, after putting `#define PI 3.14159` near the top of your shader file, you can use code like: `float circle_area = PI * radius * radius;`.  Note, the `#define` line should NOT be ended with a semicolon.
 * **`#define USE_PM_ALPHA 1`** By default, OBS will pass through pre-multiplied alpha color values. This can cause issues if the source being filtered has opacity values that are not zero or one. By default, shaderfilter now corrects internally for premultipled alpha, but if you have written an older shader that does the correction itself, you can turn off the correction by placing `#define USE_PM_ALPHA 1` near the top of your shader file.
+* **`#define STATE_SCALE <value>`** The size of the state texture relative to the filter output, e.g. `0.5` for half
+  resolution. Accepts `0.01` to `4.0`, default `1.0`. A state texture larger than 256 MB is scaled down to fit.
+  Only used with a [state pass](#state-pass).
+* **`#define STATE_FORMAT <format>`** The format of the state texture: `RGBA8` (default), `RGBA16F` or `RGBA32F`.
+  Floating point formats store values outside 0..1 and keep small increments that 8 bits would round away.
+  Only used with a [state pass](#state-pass).
 
 ### Example shaders
 
